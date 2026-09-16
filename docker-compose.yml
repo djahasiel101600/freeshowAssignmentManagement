@@ -53,7 +53,7 @@ services:
     image: freeshow-sms-frontend:latest
     # Host port is configurable so you can map to 8080/etc. if 80 is taken.
     ports:
-      - "${FRONTEND_PORT:-80}:80"
+      - 80
     depends_on:
       server:
         condition: service_healthy
@@ -71,8 +71,8 @@ networks:
     #   JDP_NETWORK_EXTERNAL=true   JDP_NETWORK_NAME=jdp-network
     # (define them in a local root .env — see .env.example. Compose loads it
     # automatically, so plain `docker compose up -d --build` just works.)
-    name: ${JDP_NETWORK_NAME:-freeshow-sms-internal}
-    external: ${JDP_NETWORK_EXTERNAL:-false}
+    name: jdp-network
+    external: true
 
 volumes:
   server-data:
