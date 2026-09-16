@@ -1,4 +1,3 @@
-# syntax=docker/dockerfile-base:1.4
 # Receiver service (FastAPI) - API + reverse-proxies + SPA serving.
 # Context is the server/ directory, so COPY paths are relative to it.
 

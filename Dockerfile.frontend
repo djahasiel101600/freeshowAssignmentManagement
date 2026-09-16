@@ -1,4 +1,3 @@
-# syntax=docker/dockerfile-base:1.4
 # Frontend service: build the Vite/React SPA, then serve it with nginx.
 # Context is the repo root (needed for package.json, src/, vite.config.ts, ...).
 
