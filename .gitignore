@@ -17,6 +17,10 @@ dist-ssr
 .env.*
 !.env.example
 
+# Cloudflare Tunnel (local secrets + compose override — never commit)
+cloudflared/
+docker-compose.override.yml
+
 # Python (bridge + receiver)
 __pycache__/
 *.py[cod]

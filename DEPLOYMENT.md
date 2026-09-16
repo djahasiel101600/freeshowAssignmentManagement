@@ -199,18 +199,31 @@ able to reach FreeShow on `localhost:5505`.
 sudo apt update
 sudo apt install -y docker.io docker-buildx-plugin docker-compose-plugin
 sudo systemctl enable --now docker
-
-# generate secrets once, then paste the hex into server/.env
-openssl rand -hex 32   # BRIDGE_TOKEN (must also match bridge/.env)
-openssl rand -hex 32   # APP_TOKEN   (paste into the app's Settings later)
+# your host must already have the shared network all your projects use:
+docker network ls                     # you should see "jdp-network"
 ```
 
-Copy the env template and fill it in with those values:
+Generate secrets once, then paste the hex into `server/.env` (and the same
+`BRIDGE_TOKEN` later into `bridge/.env`):
 
 ```bash
+openssl rand -hex 32   # BRIDGE_TOKEN
+openssl rand -hex 32   # APP_TOKEN  (also paste into the app's Settings -> Server)
+```
+
+Copy the committed env templates — `.env.example` is **pre-set for
+`jdp-network`**, so there's no YAML editing to reach the shared network:
+
+```bash
+cp .env.example .env            # already sets JDP_NETWORK_EXTERNAL=true / jdp-network
 cp server/.env.example server/.env
 # edit server/.env -> BRIDGE_TOKEN, APP_TOKEN, SEMAPHORE_TARGET, WEBHOOK_TARGET
 ```
+
+With `.env` in place, **plain `docker compose up -d --build` attaches both
+services to your existing `jdp-network`** and creates **no** extra network.
+The frontend is then reachable from any other container on `jdp-network`
+(cloudflared, your other projects) as `freeshow-sms-manager-frontend:80`.
 
 ### Build & run
 
@@ -257,18 +270,141 @@ state: `docker compose down -v` (removes containers, network **and** volume).
 
 ### Point cloudflared at the stack
 
-Let cloudflared terminate TLS and target the frontend (nginx):
+`cloudflared` terminates TLS and forwards **plain HTTP** to the frontend (nginx
+on :80) — nginx itself does **not** need a certificate. Pick one option below.
+
+> **Zero Trust dashboard note:** a tunnel's **Routes** entry in the Cloudflare
+> dashboard only binds a Cloudflare hostname/CNAME *to the tunnel* (that's the
+> DNS side). It does **not** define where traffic is forwarded — the **ingress**
+> rule (`hostname → http://<origin>:<port>`) must come from the tunnel's
+> `config.yml` **or** the `--url`/`--hostname` run flags (Option C). So you can't
+> skip configuration entirely; you can only avoid a config file with quick-run mode.
+
+Whichever you choose, keep the **bridge** (running on the FreeShow machine)
+pointing at the **public** URL so it POSTs where the tunnel forwards
+(`frontend → server`):
+
+```bash
+python3 freeshow_bridge.py --server-url https://sms.your-domain.example ...
+#                             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+#                             must be the public https URL, NOT localhost
+```
+
+#### Option A — cloudflared as a host service (simplest, recommended)
+
+Run the tunnel on the Ubuntu host; it reaches the frontend's published port
+(`FRONTEND_PORT=80` in `.env`). The frontend is the only container that needs
+a host port.
+
+```bash
+# install once (Cloudflare's package or a direct binary download)
+cloudflared tunnel login
+cloudflared tunnel create freeshow-sms
+```
+
+`/etc/cloudflared/config.yml`:
 
 ```yaml
+tunnel: freeshow-sms
+credentials-file: /etc/cloudflared/freeshow-sms.json
+
 ingress:
   - hostname: sms.your-domain.example
-    service: http://127.0.0.1:80
-  - service: http_status:404
+    service: http://127.0.0.1:80            # 127.0.0.1: host -> frontend(:80)
+    originRequest:
+      http2: true                           # backend speaks HTTP/1.1, HTTP/2 ok
+  - service: http_status:404                 # catch-all fallback
 ```
+
+Run it as a systemd unit (the `cloudflared` package ships one) or manually:
 
 ```bash
 sudo systemctl restart cloudflared
+# or: cloudflared tunnel --config /etc/cloudflared/config.yml run freeshow-sms
+```
+
+#### Option B — cloudflared as a container on `jdp-network` (no host port needed)
+
+If you attached the stack to your existing `jdp-network`, run cloudflared in a
+container on **that same network**. The tunnel can then reach the frontend by
+its Compose service name, so the frontend no longer needs to publish :80 to
+the host at all (slightly more secure). Drop this into a
+`docker-compose.override.yml` (never committed, since it holds your tunnel
+credentials):
+
+```yaml
+services:
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    restart: unless-stopped
+    networks:
+      - internal
+    volumes:
+      - ./cloudflared:/etc/cloudflared:ro
+    command: tunnel --config /etc/cloudflared/config.yml run freeshow-sms
+```
+
+`cloudflared/config.yml` (note the Compose service name as the upstream):
+
+```yaml
+tunnel: freeshow-sms
+credentials-file: /etc/cloudflared/freeshow-sms.json
+
+ingress:
+  - hostname: sms.your-domain.example
+    service: http://freeshow-sms-manager-frontend:80
+    originRequest:
+      http2: true
+  - service: http_status:404
+```
+
+Then: `docker compose up -d --build` (compose merges the override) and
+`docker compose logs -f cloudflared`.
+
+> Tip: the frontend service name is `<project>-frontend` (`freeshow-sms-manager-frontend`
+> by default since `name: freeshow-sms-manager` in the compose file). Adjust if
+> you change `COMPOSE_PROJECT_NAME`.
+
+#### Option C — quick `docker run`, **no config.yml** (cloudflared already in Docker)
+
+If you don't want to manage a tunnel credentials file or an override compose file,
+just run the `cloudflare/cloudflared` image in quick mode: it forwards a single
+hostname straight to the frontend container **and** registers the route for you.
+The container must join the same Docker network the frontend is on (by default
+`freeshow-sms-internal`; use `jdp-network` if you attached the stack to yours, or
+the docker-network name shown by `docker network ls`).
+
+```bash
+docker run --rm -i --network=freeshow-sms-internal  \   # or: jdp-network
+  cloudflare/cloudflared:latest \
+  tunnel --url http://freeshow-sms-manager-frontend:80 \
+         --hostname sms.your-domain.example
+```
+
+- First run opens a browser window at `http://127.0.0.1:<port>` → log in to
+  Cloudflare and pick the account. For **headless** servers: run
+  `cloudflared tunnel login` once to capture the cert, then add
+  `--token <TOKEN>` (from `cloudflared tunnel token create`) to the command above.
+- Wrap it with `restart: always` semantics yourself (e.g. a tiny systemd unit, or
+  `docker run --restart=unless-stopped`). `--rm` keeps it a clean single-purpose process.
+- **Production check:** quick mode runs an *autonomous* (temporary) tunnel. For a
+  persistent, restartable tunnel that survives host reboots cleanly, prefer
+  **Option A** (host systemd + credentials file) or **Option B** (compose service)
+  — they use a named tunnel you create once with `cloudflared tunnel create`.
+
+### Verify the tunnel
+
+```bash
+# 1. Receiver behind the tunnel
 curl -s https://sms.your-domain.example/api/health
+#   -> {"ok":true,"variableCount":...,"pendingCommands":...,"uptimeSeconds":...}
+
+# 2. SPA served by nginx (through the tunnel)
+curl -s -o /dev/null -w "%{http_code}\n" https://sms.your-domain.example/         # 200 (index.html)
+curl -s -o /dev/null -w "%{http_code}\n" https://sms.your-domain.example/settings # 200 (SPA fallback)
+
+# 3. Healthcheck inside the stack
+docker compose ps          # 'server' (healthy) and 'frontend' both 'Up'
 ```
 
 ### Bridge (unchanged)
@@ -282,13 +418,6 @@ python3 freeshow_bridge.py \
   --bridge-token <BRIDGE_TOKEN> \
   --freeshow-http-url http://localhost:5505 \
   --freeshow-ws-url ws://localhost:5505
-```
-
-### Verify
-
-```bash
-docker compose ps                 # 'server' and 'frontend' both 'Up'
-curl -s https://sms.your-domain.example/api/health
 ```
 
 ### Operations
