@@ -238,29 +238,27 @@ docker compose logs -f           # tail both services
 Both services share one isolated network; the receiver is **not** published to
 the host — only the frontend is.
 
-### Joining an existing Docker network (e.g. `jdp-network`)
+### Joining an existing Docker network (e.g. `jdp-network`) — the default
 
-If your Ubuntu host already runs a shared Docker network (the homelab default
-`jdp-network`), attach both containers to it instead of the auto-created one.
-Create a root `.env` (compose reads it automatically):
+This is the **default** for this project: `.env.example` already ships
+`JDP_NETWORK_EXTERNAL=true` / `JDP_NETWORK_NAME=jdp-network` (copied in the step
+above). You only need to touch network names here if your shared network isn't
+called `jdp-network`.
+
+To join a network with a different name, override it in `.env` (Compose reads it
+automatically):
 
 ```bash
 cat > .env <<'EOF'
 FRONTEND_PORT=80
 JDP_NETWORK_EXTERNAL=true
-JDP_NETWORK_NAME=jdp-network
+JDP_NETWORK_NAME=your-other-network
 EOF
 ```
 
-Then:
-
-```bash
-docker compose up -d --build
-```
-
-Both the frontend and the receiver will join `jdp-network`. Leave
-`JDP_NETWORK_EXTERNAL=false` (or omit the file) to let Compose make its own
-isolated network.
+Then: `docker compose up -d --build` — both services attach to that network and
+**no** extra/throwaway network is created. Set `JDP_NETWORK_EXTERNAL=false` to
+let Compose make a private isolated network instead.
 
 ### State & data
 
