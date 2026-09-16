@@ -1,0 +1,11 @@
+# Build-context exclusions for the SERVER image (context: ./server).
+# Keeps the runtime image minimal; ensures secrets are not even sent to the
+# daemon. The Dockerfile only COPYs app.py and requirements.txt.
+.env
+README.md
+freeshow-receiver.service
+freeshow-bridge.service
+__pycache__/
+*.py[cod]
+*.egg-info/
+data/

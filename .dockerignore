@@ -1,0 +1,36 @@
+# Build-context exclusions for the FRONTEND image (context: repo root).
+# Keeps `npm ci` + `npm run build` fast and small, and keeps secrets / the
+# server & bridge trees out of the frontend build context.
+# NOTE: package.json, package-lock.json, src/, public/, vite.config.ts,
+# tsconfig*.json, index.html, components.json, tailwind/postcss configs and
+# nginx.conf MUST remain included (they are copied by Dockerfile.frontend).
+
+node_modules/
+.git/
+.gitignore
+
+# Vite output is always rebuilt inside the builder stage.
+dist/
+dist-ssr/
+
+# Caches
+.angular/
+.nuxt/
+.vscode/
+.idea/
+.DS_Store
+*.swp
+*.swo
+*.log
+logs/
+
+# The FreeShow bridge runs on the FreeShow machine, not in Docker.
+bridge/
+# Server code is built from its own Dockerfile (context: ./server).
+server/
+
+# Secrets are injected at runtime via docker-compose — never baked into images.
+.env
+.env.*
+!.env.example
+

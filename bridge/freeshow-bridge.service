@@ -1,0 +1,31 @@
+# FreeShow Variable Bridge (systemd unit for the FreeShow machine, e.g. parrot OS)
+#
+# Install:
+#   1. Place this project at /home/dj/freeshow-bridge (or adjust paths below).
+#   2. python3 -m venv /home/dj/freeshow-bridge/venv
+#      /home/dj/freeshow-bridge/venv/bin/pip install -r /home/dj/freeshow-bridge/requirements.txt
+#   3. Create /home/dj/freeshow-bridge/.env from .env.example and fill in
+#      SERVER_URL and BRIDGE_TOKEN.
+#   4. cp freeshow-bridge.service ~/.config/systemd/user/   (user service)
+#      systemctl --user daemon-reload
+#      systemctl --user enable --now freeshow-bridge
+#      loginctl enable-linger $USER        # keep it running after logout
+#   (Or install system-wide: sudo cp freeshow-bridge.service /etc/systemd/system/
+#    and change User= below to your desktop user.)
+
+[Unit]
+Description=FreeShow Variable Bridge (FreeShow -> SMS Manager server)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=%i
+WorkingDirectory=/home/dj/freeshow-bridge
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/home/dj/freeshow-bridge/venv/bin/python /home/dj/freeshow-bridge/freeshow_bridge.py
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=default.target

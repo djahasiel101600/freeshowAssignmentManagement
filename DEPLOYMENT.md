@@ -1,0 +1,328 @@
+# Deployment Guide
+
+Deploy the FreeShow SMS Manager so the web app runs on an **Ubuntu server**
+(reachable through a **cloudflared tunnel**) while only a small Python bridge
+runs next to **FreeShow** on your desktop.
+
+## Architecture
+
+```
+PARROT OS (FreeShow machine)                     UBUNTU SERVER (cloudflared tunnel)
+────────────────────────────────┐               ┌──────────────────────────────────┐
+│ FreeShow  (API on :5505)       │               │ freeshow-receiver (systemd)      │
+│   ▲ HTTP  change_variable      │  POST snap    │   POST /api/variables ── bridge  │
+│   │                            │──────────────►│   GET  /api/variables ◄─ browser │
+│    WS + HTTP get_variables    │               │   POST /api/commands  ◄─ browser │
+│                                │  GET commands │   GET  /api/commands  ◄─ bridge  │
+│ freeshow-bridge (systemd) ─────┼──────────────►│   /semaphore/* → api.semaphore.co│
+└────────────────────────────────┘   apply + ack │   /webhook/*   → n8n             │
+                                                 │   /*           → dist/ (SPA)     │
+                                                 └───────────────┬──────────────────┘
+                                                    [Browser] ───┘ /api/variables (10s)
+```
+
+**Two data lanes**
+
+1. **Sync (bridge → server):** FreeShow's variables are watched via WebSocket
+   (with an HTTP poll as a guaranteed fallback), diffed, and POSTed as a full
+   snapshot.
+2. **Commands (server → bridge):** variable edits made in the web app are
+   queued and applied to FreeShow by the bridge.
+
+Because the snapshot is the source of truth, a restart of any component
+self-heals: the bridge re-pushes everything it sees.
+
+## 1. Server prerequisites
+
+```bash
+sudo apt update
+sudo apt install -y python3-venv nodejs npm
+node -v   # 18+ recommended
+```
+
+## 2. Deploy the app + receiver
+
+```bash
+sudo mkdir -p /opt/freeshow-sms && sudo chown $USER /opt/freeshow-sms
+# copy the project (git clone / rsync / scp) into /opt/freeshow-sms
+
+cd /opt/freeshow-sms
+npm ci
+npm run build                       # produces dist/ that the receiver serves
+
+cd server
+python3 -m venv venv
+./venv/bin/pip install -r requirements.txt
+cp .env.example .env
+```
+
+Generate the secrets and fill in `.env`:
+
+```bash
+openssl rand -hex 32   # BRIDGE_TOKEN  (paste into server/.env AND bridge/.env)
+openssl rand -hex 32   # APP_TOKEN     (paste into server/.env, then into Settings)
+```
+
+`server/.env` should end up looking like:
+
+```ini
+BRIDGE_TOKEN=<the first random hex>
+APP_TOKEN=<the second random hex>
+## 3. Run the receiver as a service
+
+```bash
+sudo useradd -r -s /usr/sbin/nologin freeshow
+sudo chown -R freeshow:freeshow /opt/freeshow-sms/server/data
+sudo cp server/freeshow-receiver.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now freeshow-receiver
+sudo journalctl -u freeshow-receiver -f
+```
+
+Check it locally before involving the tunnel:
+
+```bash
+curl -s http://127.0.0.1:8000/api/health
+```
+
+## 4. Point cloudflared at it
+
+Add an ingress rule to your tunnel config (`~/.cloudflared/config.yml` or the
+dashboard):
+
+```yaml
+ingress:
+  - hostname: sms.your-domain.example
+    service: http://127.0.0.1:8000
+  - service: http_status:404
+```
+
+```bash
+sudo systemctl restart cloudflared
+curl -s https://sms.your-domain.example/api/health
+```
+
+Recommended: protect the hostname with **Cloudflare Access** as well.
+
+## 5. Deploy the bridge on the FreeShow machine
+
+```bash
+cd ~/Documents/FreeShow/Script/freeshowAssignmentManagement/bridge
+python3 -m venv venv
+./venv/bin/pip install -r requirements.txt
+cp .env.example .env
+```
+
+Edit `bridge/.env`:
+
+```ini
+SERVER_URL=https://sms.your-domain.example
+BRIDGE_TOKEN=<same value as server/.env>
+```
+
+Test it in the foreground — you should see a line like
+`Synced 8 variables to server (trigger=startup, initial)`:
+
+```bash
+./venv/bin/python freeshow_bridge.py --verbose
+```
+
+Then install the user service:
+
+```bash
+mkdir -p ~/.config/systemd/user
+cp freeshow-bridge.service ~/.config/systemd/user/
+systemctl --user daemon-reload
+systemctl --user enable --now freeshow-bridge
+loginctl enable-linger $USER
+journalctl --user -u freeshow-bridge -f
+```
+
+## 6. First-run setup in the app
+
+1. Open `https://sms.your-domain.example`.
+2. **Settings → Bridge & Server** — the card should read **Receiver online** with
+   a recent *Last sync*. Paste the `APP_TOKEN` and press **Save Settings**.
+3. **Settings → Semaphore SMS** — enter your API key + registered sender name,
+   then press **Test Connection**.
+4. **Settings → Data Management** — use **Import Backup** to restore your
+   contacts/templates/rules/history if you exported them from the old machine.
+   (Those four datasets live in each browser's `localStorage`, so they do not
+   follow you to a new browser automatically.)
+5. **Variables** tab — confirm your FreeShow variables appear.
+## 7. Verification checklist
+
+| # | Test | Expected |
+|---|---|---|
+| 1 | Change a variable in FreeShow | app shows it within ~5s |
+| 2 | Edit a variable in the app | FreeShow updates within ~10s, then all browsers converge |
+| 3 | Restart the receiver | variables still present (from `variables.json`) |
+| 4 | Stop the bridge | app shows stale data + `pendingCommands` grows; SMS still sends with last-known values |
+| 5 | Start the bridge again | queued edits apply, snapshot re-syncs |
+| 6 | Send 3 SMS from Conditional | 3 rows in History |
+| 7 | `POST /api/commands` without the app token | `401` |
+
+## Operations
+
+```bash
+# logs
+sudo journalctl -u freeshow-receiver -n 100 --no-pager
+journalctl --user -u freeshow-bridge -n 100 --no-pager
+
+# restart after a code change
+cd /opt/freeshow-sms && npm run build && sudo systemctl restart freeshow-receiver
+
+# state files
+ls -l /opt/freeshow-sms/server/data     # variables.json, commands.json
+```
+
+### Updating the app
+
+```bash
+cd /opt/freeshow-sms && git pull && npm ci && npm run build
+sudo systemctl restart freeshow-receiver
+```
+
+The receiver picks up the new `dist/` on restart; no bridge change is needed.
+
+## Docker Compose (alternative deployment)
+
+If you prefer containers over the systemd units above, `docker-compose.yml`
+bundles **both** the web frontend (nginx serving the built SPA) and the
+receiver (`server/app.py`) on a private network. The FreeShow bridge still
+runs on the FreeShow machine — it is **not** containerized, because it must be
+able to reach FreeShow on `localhost:5505`.
+
+### One-time setup
+
+```bash
+sudo apt update
+sudo apt install -y docker.io docker-buildx-plugin docker-compose-plugin
+sudo systemctl enable --now docker
+
+# generate secrets once, then paste the hex into server/.env
+openssl rand -hex 32   # BRIDGE_TOKEN (must also match bridge/.env)
+openssl rand -hex 32   # APP_TOKEN   (paste into the app's Settings later)
+```
+
+Copy the env template and fill it in with those values:
+
+```bash
+cp server/.env.example server/.env
+# edit server/.env -> BRIDGE_TOKEN, APP_TOKEN, SEMAPHORE_TARGET, WEBHOOK_TARGET
+```
+
+### Build & run
+
+```bash
+docker compose up -d --build     # builds both images, starts both services
+docker compose logs -f           # tail both services
+```
+
+- Frontend: `http://<server-ip>` (nginx on :80).
+- Receiver API: `http://<server-ip>/api/health` (proxied through nginx).
+
+Both services share one isolated network; the receiver is **not** published to
+the host — only the frontend is.
+
+### Joining an existing Docker network (e.g. `jdp-network`)
+
+If your Ubuntu host already runs a shared Docker network (the homelab default
+`jdp-network`), attach both containers to it instead of the auto-created one.
+Create a root `.env` (compose reads it automatically):
+
+```bash
+cat > .env <<'EOF'
+FRONTEND_PORT=80
+JDP_NETWORK_EXTERNAL=true
+JDP_NETWORK_NAME=jdp-network
+EOF
+```
+
+Then:
+
+```bash
+docker compose up -d --build
+```
+
+Both the frontend and the receiver will join `jdp-network`. Leave
+`JDP_NETWORK_EXTERNAL=false` (or omit the file) to let Compose make its own
+isolated network.
+
+### State & data
+
+The two JSON files (`variables.json`, `commands.json`) live in a named volume
+`freeshow-sms-server-data` and survive restarts and image upgrades. To wipe
+state: `docker compose down -v` (removes containers, network **and** volume).
+
+### Point cloudflared at the stack
+
+Let cloudflared terminate TLS and target the frontend (nginx):
+
+```yaml
+ingress:
+  - hostname: sms.your-domain.example
+    service: http://127.0.0.1:80
+  - service: http_status:404
+```
+
+```bash
+sudo systemctl restart cloudflared
+curl -s https://sms.your-domain.example/api/health
+```
+
+### Bridge (unchanged)
+
+On the FreeShow machine, run the bridge as in step 5 — but point it at the
+public URL instead of localhost:
+
+```bash
+python3 freeshow_bridge.py \
+  --server-url https://sms.your-domain.example \
+  --bridge-token <BRIDGE_TOKEN> \
+  --freeshow-http-url http://localhost:5505 \
+  --freeshow-ws-url ws://localhost:5505
+```
+
+### Verify
+
+```bash
+docker compose ps                 # 'server' and 'frontend' both 'Up'
+curl -s https://sms.your-domain.example/api/health
+```
+
+### Operations
+
+| Command | What it does |
+|---|---|
+| `docker compose stop` | stop both services |
+| `docker compose start` | start both services (keeps state) |
+| `docker compose down -v` | stop + remove containers, network and volume |
+| `docker compose up -d --build` | rebuild images and (re)start (use after code changes) |
+
+> Tip: keep `server/.env` in sync between the systemd and Docker flows — they use
+> the same `BRIDGE_TOKEN`/`APP_TOKEN` keys.
+
+## Troubleshooting
+
+| Symptom | Fix |
+|---|---|
+| "Receiver offline" in Settings | `systemctl status freeshow-receiver`; confirm the tunnel points at `127.0.0.1:8000` |
+| Variables empty, health `variableCount: 0` | bridge not running / wrong `SERVER_URL` / token mismatch |
+| Bridge logs `401` | `BRIDGE_TOKEN` differs between `bridge/.env` and `server/.env` |
+| Bridge logs `FreeShow HTTP unreachable` | FreeShow not running, or its API disabled in *Settings → Connections*; try `--freeshow-http-url http://localhost:5506` |
+| App edits never reach FreeShow | `ENABLE_COMMANDS` must not be `false` in `bridge/.env` |
+| SMS fails with `HTTP 401` | `APP_TOKEN` not entered in the app's Settings |
+| SMS fails with a Semaphore code | sender name must be registered (max 11 chars); number must be `+639…` / `09…` |
+| `Frontend build not found` | run `npm run build`; verify `DIST_DIR` |
+| Changes take ~10s to show in the browser | expected — the UI polls every 10s |
+
+## What is intentionally NOT included
+
+* No database — the receiver persists two JSON files.
+* No user accounts — a shared app token plus optional Cloudflare Access.
+* Contacts, templates, conditional rules and history stay in browser
+  `localStorage`; move them between browsers with **Settings → Data Management**.
+* No server-side n8n auto-forwarding yet (phase 2). The `/webhook/*` proxy
+  exists for parity, but the browser can also call your n8n URL directly.
+```

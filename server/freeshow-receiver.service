@@ -1,0 +1,37 @@
+# FreeShow SMS Manager - Receiver (systemd unit for the Ubuntu server)
+#
+# Install:
+#   1. Place this project at /opt/freeshow-sms (or adjust paths below).
+#   2. python3 -m venv /opt/freeshow-sms/server/venv
+#      /opt/freeshow-sms/server/venv/bin/pip install -r /opt/freeshow-sms/server/requirements.txt
+#   3. Create /opt/freeshow-sms/server/.env from .env.example and fill in tokens.
+#   4. sudo cp freeshow-receiver.service /etc/systemd/system/
+#      sudo systemctl daemon-reload
+#      sudo systemctl enable --now freeshow-receiver
+#   5. Point your cloudflared tunnel at http://127.0.0.1:8000
+
+[Unit]
+Description=FreeShow SMS Manager Receiver (API + static host)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# Run as a dedicated user; create one with:
+#   sudo useradd -r -s /usr/sbin/nologin freeshow
+User=freeshow
+Group=freeshow
+WorkingDirectory=/opt/freeshow-sms/server
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/opt/freeshow-sms/server/venv/bin/uvicorn app:app --host 127.0.0.1 --port 8000
+Restart=always
+RestartSec=5
+
+# Optional hardening
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ReadWritePaths=/opt/freeshow-sms/server/data
+
+[Install]
+WantedBy=multi-user.target

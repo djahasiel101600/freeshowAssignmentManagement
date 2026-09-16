@@ -1,0 +1,79 @@
+# FreeShow SMS Manager — Docker Compose.
+#
+# Two services, both on an isolated internal network:
+#   - frontend : nginx serving the built React SPA (port 80 -> host).
+#   - server   : FastAPI receiver + API + /semaphore + /webhook proxies.
+#
+# The frontend container reverse-proxies /api, /semaphore and /webhook to the
+# "server" service (Compose DNS resolves the name `server`). The server is NOT
+# published to the host — only the frontend is (defense in depth).
+#
+# The FreeShow bridge is intentionally NOT in Docker: it runs on the FreeShow
+# machine and POSTs to this server's public URL (see DEPLOYMENT.md).
+#
+# 1) Edit ./server/.env  (BRIDGE_TOKEN, APP_TOKEN, upstream targets)
+# 2) docker compose up -d --build
+# 3) Browse to http://localhost  (or your cloudflared tunnel target)
+#    and watch the Settings panel go green.
+#
+# The server's healthcheck waits for GET /api/health before the frontend
+# starts accepting traffic, so you won't see a "connection refused" flash.
+
+name: freeshow-sms-manager
+
+services:
+  server:
+    build:
+      context: ./server
+      dockerfile: Dockerfile
+    image: freeshow-sms-server:latest
+    env_file:
+      # Real secrets; the .env in the repo is the committed .env.example.
+      - ./server/.env
+    environment:
+      - TZ=UTC
+      - DATA_DIR=/app/data            # persisted via the named volume below
+    volumes:
+      - server-data:/app/data
+    networks:
+      - internal
+    restart: unless-stopped
+    healthcheck:
+      # python stdlib only (python:3.11-slim has no curl)
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/api/health',timeout=5).status==200 else 1)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+
+  frontend:
+    build:
+      context: .
+      dockerfile: Dockerfile.frontend
+    image: freeshow-sms-frontend:latest
+    # Host port is configurable so you can map to 8080/etc. if 80 is taken.
+    ports:
+      - "${FRONTEND_PORT:-80}:80"
+    depends_on:
+      server:
+        condition: service_healthy
+    environment:
+      - TZ=UTC
+    networks:
+      - internal
+    restart: unless-stopped
+
+networks:
+  internal:
+    # By default Docker Compose creates its own isolated network for the two
+    # services. To attach BOTH to an EXISTING network instead (e.g. your
+    # homelab "jdp-network"), point this at it:
+    #   JDP_NETWORK_EXTERNAL=true   JDP_NETWORK_NAME=jdp-network
+    # (define them in a local root .env — see .env.example. Compose loads it
+    # automatically, so plain `docker compose up -d --build` just works.)
+    name: ${JDP_NETWORK_NAME:-freeshow-sms-internal}
+    external: ${JDP_NETWORK_EXTERNAL:-false}
+
+volumes:
+  server-data:
+    name: freeshow-sms-server-data
