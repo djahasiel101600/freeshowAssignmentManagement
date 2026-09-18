@@ -223,7 +223,7 @@ cp server/.env.example server/.env
 With `.env` in place, **plain `docker compose up -d --build` attaches both
 services to your existing `jdp-network`** and creates **no** extra network.
 The frontend is then reachable from any other container on `jdp-network`
-(cloudflared, your other projects) as `freeshow-sms-manager-frontend:80`.
+(cloudflared, your other projects) as `freeshow-frontend:80`.
 
 ### Build & run
 
@@ -350,7 +350,7 @@ credentials-file: /etc/cloudflared/freeshow-sms.json
 
 ingress:
   - hostname: sms.your-domain.example
-    service: http://freeshow-sms-manager-frontend:80
+        service: http://freeshow-frontend:80
     originRequest:
       http2: true
   - service: http_status:404
@@ -359,8 +359,8 @@ ingress:
 Then: `docker compose up -d --build` (compose merges the override) and
 `docker compose logs -f cloudflared`.
 
-> Tip: the frontend service name is `<project>-frontend` (`freeshow-sms-manager-frontend`
-> by default since `name: freeshow-sms-manager` in the compose file). Adjust if
+> Tip: the frontend service name is `<project>-frontend` (`freeshow-frontend`
+> by default since `name: freeshow` in the compose file). Adjust if
 > you change `COMPOSE_PROJECT_NAME`.
 
 #### Option C — quick `docker run`, **no config.yml** (cloudflared already in Docker)
@@ -375,7 +375,7 @@ the docker-network name shown by `docker network ls`).
 ```bash
 docker run --rm -i --network=freeshow-sms-internal  \   # or: jdp-network
   cloudflare/cloudflared:latest \
-  tunnel --url http://freeshow-sms-manager-frontend:80 \
+    tunnel --url http://freeshow-frontend:80 \
          --hostname sms.your-domain.example
 ```
 

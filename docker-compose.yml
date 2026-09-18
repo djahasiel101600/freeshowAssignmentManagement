@@ -19,10 +19,10 @@
 # The server's healthcheck waits for GET /api/health before the frontend
 # starts accepting traffic, so you won't see a "connection refused" flash.
 
-name: freeshow-sms-manager
+name: freeshow
 
 services:
-  server:
+  freeshow-server:
     build:
       context: ./server
       dockerfile: Dockerfile
@@ -46,7 +46,7 @@ services:
       retries: 3
       start_period: 15s
 
-  frontend:
+  freeshow-frontend:
     build:
       context: .
       dockerfile: Dockerfile.frontend
@@ -55,7 +55,7 @@ services:
     ports:
       - 80
     depends_on:
-      server:
+      freeshow-server:
         condition: service_healthy
     environment:
       - TZ=UTC
