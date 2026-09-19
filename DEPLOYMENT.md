@@ -140,16 +140,26 @@ journalctl --user -u freeshow-bridge -f
 
 ## 6. First-run setup in the app
 
-1. Open `https://sms.your-domain.example`.
+1. Open `https://sms.your-domain.example` and **Sign in** (first start creates
+   the admin account — see *First sign-in* above; without `ADMIN_PASSWORD` the
+   generated one is printed once in the service logs: `journalctl -u freeshow-server`).
 2. **Settings → Bridge & Server** — the card should read **Receiver online** with
    a recent *Last sync*. Paste the `APP_TOKEN` and press **Save Settings**.
 3. **Settings → Semaphore SMS** — enter your API key + registered sender name,
-   then press **Test Connection**.
-4. **Settings → Data Management** — use **Import Backup** to restore your
-   contacts/templates/rules/history if you exported them from the old machine.
-   (Those four datasets live in each browser's `localStorage`, so they do not
-   follow you to a new browser automatically.)
+   then press **Test Connection**. (Semaphore + webhook settings are stored on
+   the server now, so they follow every account/device.)
+4. **Settings → Data Backup & Restore** — use **Import Backup** to restore
+   contacts/templates/rules/history from an old backup file. Everything lives in
+   the receiver's database now, so data follows you to any browser after you
+   sign in — no per-device copy needed.
 5. **Variables** tab — confirm your FreeShow variables appear.
+6. **Rotation → Tracked variables** — list the FreeShow variable names (or name
+   patterns, e.g. `schedule_`) whose values represent a person's assignment.
+   From then on the bridge's snapshots write every change into the **Schedule**
+   ledger automatically.
+7. **Schedule** tab — the assignment history (who was assigned, on which day,
+   from which source). **Rotation** tab — cycle detection: turn counts, median
+   gaps, rotation order, and who is expected next.
 ## 7. Verification checklist
 
 | # | Test | Expected |
@@ -217,7 +227,8 @@ Copy the committed env templates — `.env.example` is **pre-set for
 ```bash
 cp .env.example .env            # already sets JDP_NETWORK_EXTERNAL=true / jdp-network
 cp server/.env.example server/.env
-# edit server/.env -> BRIDGE_TOKEN, APP_TOKEN, SEMAPHORE_TARGET, WEBHOOK_TARGET
+# edit server/.env -> BRIDGE_TOKEN, APP_TOKEN, ADMIN_PASSWORD, SEMAPHORE_TARGET,
+#                     WEBHOOK_TARGET, SESSION_COOKIE_SECURE=true, SCHEDULE_TZ
 ```
 
 With `.env` in place, **plain `docker compose up -d --build` attaches both
@@ -262,9 +273,36 @@ let Compose make a private isolated network instead.
 
 ### State & data
 
-The two JSON files (`variables.json`, `commands.json`) live in a named volume
-`freeshow-sms-server-data` and survive restarts and image upgrades. To wipe
-state: `docker compose down -v` (removes containers, network **and** volume).
+Everything persistent lives in the named volume `freeshow-sms-server-data`
+(mounted at `/app/data` inside the receiver) and survives restarts and image
+upgrades:
+
+| File | Contents |
+| --- | --- |
+| `freeshow.db` | SQLite database — users, sessions, contacts, templates, rules, message history, **assignment ledger**, settings |
+| `variables.json` | latest variable snapshot from the bridge |
+| `commands.json` | in-flight variable-edit commands |
+
+To wipe state: `docker compose down -v` (removes containers, network **and**
+volume). To back up just the data: use the app's **Settings → Data Backup &
+Restore → Export All**, or copy the volume contents (`docker run --rm -v
+freeshow-sms-server-data:/data alpine tar cz -C /data .`).
+
+### First sign-in (accounts & sessions)
+
+The app is now behind a login. On first start the receiver creates the admin
+account from `ADMIN_USERNAME`/`ADMIN_PASSWORD` in `server/.env` (if
+`ADMIN_PASSWORD` is empty, a random one is generated and printed **once** in
+`docker compose logs server` — change it right away):
+
+1. Open the app → **Sign in** with the admin account.
+2. **Account** tab — change your password here (other sessions are revoked),
+   review active sessions, and (as admin) create more accounts with
+   `user` or `admin` roles.
+3. Prefer `SESSION_COOKIE_SECURE=true` in `server/.env` since traffic arrives
+   over HTTPS through the Cloudflare tunnel (set it before the first start;
+   changing it later just requires a container restart).
+
 
 ### Point cloudflared at the stack
 

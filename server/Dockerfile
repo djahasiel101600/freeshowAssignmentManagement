@@ -18,7 +18,13 @@ FROM deps AS runtime
 # No .env is baked in: secrets are injected at runtime via docker-compose
 # (env_file pointing at server/.env). app.py's _load_env() reads /app/.env
 # only if present, and os.environ (from compose) wins via setdefault.
-COPY app.py ./
+#
+# The application is split into small modules so the SQLAlchemy models, the
+# auth/session helpers and the API routers stay readable. All of them must be
+# copied, otherwise uvicorn fails at import time.
+COPY app.py db.py models.py security.py timeutil.py ./
+COPY routers ./routers
+COPY services ./services
 RUN mkdir -p /app/data
 EXPOSE 8000
 CMD ["python", "-m", "uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8000"]

@@ -1,47 +1,44 @@
-import { useState } from 'react';
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import * as store from '../lib/store-api';
 import type { MessageLog } from '../types/messages';
 
-const STORAGE_KEY = 'freeshow-message-logs';
+const QUERY_KEY = ['message-logs'];
 
+/**
+ * Message history is stored in the database (previously localStorage), so the
+ * log survives restarts and is visible to every operator. The old API shape
+ * (`logs`, `addLog`, `addLogs`, `clearLogs`) is preserved for MessageHistory.
+ */
 export function useMessageLogs() {
-  const [logs, setLogs] = useState<MessageLog[]>(() => {
-    try {
-      const storedLogs = localStorage.getItem(STORAGE_KEY);
-      if (!storedLogs) return [];
-      const parsed = JSON.parse(storedLogs);
-      return Array.isArray(parsed) ? parsed : [];
-    } catch (error) {
-      console.error('Error parsing message logs:', error);
-      return [];
-    }
+  const queryClient = useQueryClient();
+
+  const logsQuery = useQuery({
+    queryKey: QUERY_KEY,
+    queryFn: () => store.fetchLogs(),
+    staleTime: 15_000,
   });
 
-  const addLog = (log: Omit<MessageLog, 'id'>) => {
-    addLogs([log]);
-  };
+  const invalidate = () => queryClient.invalidateQueries({ queryKey: QUERY_KEY });
 
-  const addLogs = (newLogs: Omit<MessageLog, 'id'>[]) => {
-    if (newLogs.length === 0) return;
-    // Give each log a unique id (timestamp + random suffix) to avoid collisions.
-    const logsToAdd: MessageLog[] = newLogs.map((log) => ({
-      ...log,
-      id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
-    }));
-    // Newest first (reverse so the last log in the batch appears on top).
-    const updatedLogs = [...logsToAdd.reverse(), ...logs];
-    setLogs(updatedLogs);
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(updatedLogs));
-  };
+  const addLogsMutation = useMutation({
+    mutationFn: (newLogs: Array<Omit<MessageLog, 'id'>>) => store.appendLogs(newLogs),
+    onSuccess: invalidate,
+  });
 
-  const clearLogs = () => {
-    setLogs([]);
-    localStorage.removeItem(STORAGE_KEY);
-  };
+  const clearLogsMutation = useMutation({
+    mutationFn: () => store.clearLogs(),
+    onSuccess: invalidate,
+  });
 
   return {
-    logs,
-    addLog,
-    addLogs,
-    clearLogs,
+    logs: logsQuery.data ?? [],
+    isLoading: logsQuery.isLoading,
+    error: logsQuery.error,
+    refetch: logsQuery.refetch,
+    addLog: (log: Omit<MessageLog, 'id'>) => addLogsMutation.mutate([log]),
+    addLogs: (newLogs: Array<Omit<MessageLog, 'id'>>) => addLogsMutation.mutate(newLogs),
+    /** Awaitable variant for callers that need to know the write succeeded. */
+    addLogsAsync: (newLogs: Array<Omit<MessageLog, 'id'>>) => addLogsMutation.mutateAsync(newLogs),
+    clearLogs: () => clearLogsMutation.mutate(),
   };
 }

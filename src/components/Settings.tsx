@@ -2,6 +2,7 @@ import { useState, useEffect } from 'react';
 import { semaphoreAPI } from '../lib/semaphore-api';
 import { webhookAPI, type WebhookConfig } from '../lib/webhook-api';
 import { serverApi, type ServerHealth } from '../lib/server-api';
+import { useAppSettings } from '../hooks/useServerData';
 import { Card, CardHeader, CardTitle, CardContent, CardFooter } from './ui/card';
 import { Button } from './ui/button';
 import { Input } from './ui/input';
@@ -11,50 +12,46 @@ import { Switch } from './ui/switch';
 import { useToast } from './ui/toast';
 import { DataManager } from './DataManager';
 
+const DEFAULT_WEBHOOK_CONFIG: WebhookConfig = {
+  url: '',
+  enabled: false,
+  retryCount: 3,
+  retryDelay: 1000,
+  includeAllVariables: true,
+  batchUpdates: false,
+  batchWindow: 2000,
+};
+
 export function Settings() {
   const toast = useToast();
+  // Semaphore + webhook settings live in the receiver's database now; these
+  // are local drafts until "Save" is pressed.
+  const { settings, save } = useAppSettings();
 
   const [semaphoreConfig, setSemaphoreConfig] = useState({
-    apiKey: localStorage.getItem('semaphore_apiKey') || '',
-    senderName: localStorage.getItem('semaphore_senderName') || 'ChurchName',
+    apiKey: '',
+    senderName: 'ChurchName',
   });
 
-  const [webhookConfig, setWebhookConfig] = useState<WebhookConfig>(() => {
-    const saved = localStorage.getItem('webhook_config');
-    if (saved) {
-      try {
-        const config = JSON.parse(saved);
-        // Ensure new fields exist
-        return {
-          ...config,
-          includeAllVariables: config.includeAllVariables !== undefined ? config.includeAllVariables : true,
-          batchUpdates: config.batchUpdates !== undefined ? config.batchUpdates : false,
-          batchWindow: config.batchWindow || 2000,
-          retryCount: config.retryCount || 3,
-          retryDelay: config.retryDelay || 1000
-        };
-      } catch {
-        return { 
-          url: '', 
-          enabled: false, 
-          retryCount: 3, 
-          retryDelay: 1000,
-          includeAllVariables: true,
-          batchUpdates: false,
-          batchWindow: 2000
-        };
-      }
+  const [webhookConfig, setWebhookConfig] = useState<WebhookConfig>(DEFAULT_WEBHOOK_CONFIG);
+  const [integrationsLoaded, setIntegrationsLoaded] = useState(false);
+
+  // Pull the saved values into the editable drafts once (and only once).
+  useEffect(() => {
+    if (!settings || integrationsLoaded) return;
+    setIntegrationsLoaded(true);
+    const semaphore = settings.semaphore as { apiKey?: string; senderName?: string } | undefined;
+    if (semaphore) {
+      setSemaphoreConfig({
+        apiKey: semaphore.apiKey ?? '',
+        senderName: semaphore.senderName ?? 'ChurchName',
+      });
     }
-    return { 
-      url: '', 
-      enabled: false, 
-      retryCount: 3, 
-      retryDelay: 1000,
-      includeAllVariables: true,
-      batchUpdates: false,
-      batchWindow: 2000
-    };
-  });
+    const webhook = settings.webhook as Partial<WebhookConfig> | undefined;
+    if (webhook) {
+      setWebhookConfig({ ...DEFAULT_WEBHOOK_CONFIG, ...webhook });
+    }
+  }, [settings, integrationsLoaded]);
 
   const [connectionStatus, setConnectionStatus] = useState<'testing' | 'connected' | 'disconnected' | 'idle'>('idle');
   const [serverHealth, setServerHealth] = useState<ServerHealth | null>(null);
@@ -180,11 +177,17 @@ export function Settings() {
     );
   };
 
-  const saveSemaphoreSettings = () => {
-    localStorage.setItem('semaphore_apiKey', semaphoreConfig.apiKey);
-    localStorage.setItem('semaphore_senderName', semaphoreConfig.senderName);
+  const saveSemaphoreSettings = async () => {
     semaphoreAPI.setConfig(semaphoreConfig);
-    toast.success('Semaphore SMS settings saved', { title: 'Settings saved' });
+    try {
+      await save('semaphore', semaphoreConfig);
+      toast.success('Semaphore SMS settings saved to the server.', { title: 'Settings saved' });
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Could not save the settings.', {
+        title: 'Save failed',
+        duration: 8000,
+      });
+    }
   };
 
   const testSemaphoreConnection = async () => {
@@ -220,11 +223,17 @@ export function Settings() {
     setTimeout(() => setSemaphoreStatus('idle'), 8000);
   };
 
-  const saveWebhookSettings = () => {
+  const saveWebhookSettings = async () => {
     webhookAPI.setConfig(webhookConfig);
-    toast.success('Variables will be automatically forwarded to n8n when they change.', {
-      title: 'Webhook settings saved',
-    });
+    try {
+      await save('webhook', webhookConfig);
+      toast.success('Webhook settings saved to the server.', { title: 'Settings saved' });
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Could not save the settings.', {
+        title: 'Save failed',
+        duration: 8000,
+      });
+    }
   };
 
   const handleWebhookToggle = (enabled: boolean) => {

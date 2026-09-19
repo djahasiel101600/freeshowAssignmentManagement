@@ -6,8 +6,16 @@ import { MessageComposer } from './components/MessageComposer';
 import { ConditionalSender } from './components/ConditionalSender';
 import { MessageHistory } from './components/MessageHistory';
 import { Settings } from './components/Settings';
+import { AssignmentsPanel } from './components/AssignmentsPanel';
+import { RotationPanel } from './components/RotationPanel';
+import { UsersPanel } from './components/UsersPanel';
+import { LoginPage } from './components/LoginPage';
+import { AuthProvider, useAuth } from './context/AuthContext';
 import { ToastProvider } from './components/ui/toast';
 import { useTheme } from './hooks/useTheme';
+import { fetchSettings } from './lib/store-api';
+import { semaphoreAPI } from './lib/semaphore-api';
+import { webhookAPI, type WebhookConfig } from './lib/webhook-api';
 import {
   MessageSquare,
   Users,
@@ -18,11 +26,23 @@ import {
   Moon,
   Monitor,
   Workflow,
+  CalendarClock,
+  LogOut,
+  Repeat,
 } from 'lucide-react';
 
 const queryClient = new QueryClient();
 
-type Tab = 'variables' | 'contacts' | 'compose' | 'conditional' | 'history' | 'settings';
+type Tab =
+  | 'variables'
+  | 'assignments'
+  | 'rotation'
+  | 'contacts'
+  | 'compose'
+  | 'conditional'
+  | 'history'
+  | 'account'
+  | 'settings';
 
 function ThemeToggle() {
   const { theme, setTheme, preference } = useTheme();
@@ -69,6 +89,7 @@ function ThemeToggle() {
 }
 
 function AppContent() {
+  const { user, isAdmin, loading, logout } = useAuth();
   const [activeTab, setActiveTab] = useState<Tab>(() => {
     return (localStorage.getItem('activeTab') as Tab) || 'variables';
   });
@@ -77,12 +98,51 @@ function AppContent() {
     localStorage.setItem('activeTab', activeTab);
   }, [activeTab]);
 
+  // Push the saved integration settings (Semaphore key, n8n webhook) into
+  // their API clients once after sign-in, so every tab can use them without
+  // the Settings tab having to be visited first.
+  useEffect(() => {
+    if (!user) return;
+    let cancelled = false;
+    void fetchSettings()
+      .then((loaded) => {
+        if (cancelled || !loaded) return;
+        const semaphore = loaded.semaphore as { apiKey?: string; senderName?: string } | undefined;
+        if (semaphore && semaphore.apiKey) {
+          semaphoreAPI.setConfig({ apiKey: semaphore.apiKey, senderName: semaphore.senderName ?? 'ChurchName' });
+        }
+        const webhook = loaded.webhook as Partial<WebhookConfig> | undefined;
+        if (webhook && webhook.url) {
+          webhookAPI.setConfig({ ...webhook } as WebhookConfig);
+        }
+      })
+      .catch(() => undefined);
+    return () => {
+      cancelled = true;
+    };
+  }, [user]);
+
+  if (loading) {
+    return (
+      <div className="flex min-h-screen items-center justify-center bg-background text-muted-foreground">
+        Checking your session…
+      </div>
+    );
+  }
+
+  if (!user) {
+    return <LoginPage />;
+  }
+
   const tabs = [
     { id: 'variables' as Tab, label: 'Variables', icon: Variable },
+    { id: 'assignments' as Tab, label: 'Schedule', icon: CalendarClock },
+    { id: 'rotation' as Tab, label: 'Rotation', icon: Repeat },
     { id: 'contacts' as Tab, label: 'Contacts', icon: Users },
     { id: 'compose' as Tab, label: 'Messages', icon: MessageSquare },
     { id: 'conditional' as Tab, label: 'Conditional', icon: Workflow },
     { id: 'history' as Tab, label: 'History', icon: History },
+    { id: 'account' as Tab, label: 'Account', icon: Users },
     { id: 'settings' as Tab, label: 'Settings', icon: SettingsIcon },
   ];
 
@@ -99,7 +159,25 @@ function AppContent() {
               </p>
             </div>
           </div>
-          <ThemeToggle />
+          <div className="flex items-center gap-3">
+            <ThemeToggle />
+            {user && (
+              <div className="flex items-center gap-2 rounded-full bg-muted px-3 py-1.5">
+                <span className="hidden text-xs font-medium sm:inline">
+                  {user.displayName}
+                  {isAdmin && <span className="ml-1 text-muted-foreground">(admin)</span>}
+                </span>
+                <button
+                  onClick={() => void logout()}
+                  aria-label="Sign out"
+                  title={`Sign out ${user.username}`}
+                  className="text-muted-foreground transition-colors hover:text-foreground"
+                >
+                  <LogOut className="h-4 w-4" />
+                </button>
+              </div>
+            )}
+          </div>
         </div>
       </header>
 
@@ -127,10 +205,13 @@ function AppContent() {
 
       <main className="container mx-auto max-w-6xl flex-1 px-4 py-8">
         {activeTab === 'variables' && <VariablesManager />}
+        {activeTab === 'assignments' && <AssignmentsPanel />}
+        {activeTab === 'rotation' && <RotationPanel />}
         {activeTab === 'contacts' && <ContactManager />}
         {activeTab === 'compose' && <MessageComposer />}
         {activeTab === 'conditional' && <ConditionalSender />}
         {activeTab === 'history' && <MessageHistory />}
+        {activeTab === 'account' && <UsersPanel />}
         {activeTab === 'settings' && <Settings />}
       </main>
 
@@ -146,9 +227,11 @@ function AppContent() {
 function App() {
   return (
     <QueryClientProvider client={queryClient}>
-      <ToastProvider>
-        <AppContent />
-      </ToastProvider>
+      <AuthProvider>
+        <ToastProvider>
+          <AppContent />
+        </ToastProvider>
+      </AuthProvider>
     </QueryClientProvider>
   );
 }

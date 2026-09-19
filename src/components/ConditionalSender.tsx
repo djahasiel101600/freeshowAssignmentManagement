@@ -1,7 +1,8 @@
-import { useCallback, useEffect, useMemo, useState, useTransition } from 'react';
+import { useCallback, useMemo, useState, useTransition } from 'react';
 import { useFreeShowVariables } from '../hooks/useFreeShowVariables';
 import { useContacts } from '../hooks/useContacts';
 import { useMessageLogs } from '../hooks/useMessageLogs';
+import { useConditionalRules, useTemplates } from '../hooks/useServerData';
 import { semaphoreAPI } from '../lib/semaphore-api';
 import { getCachedServerVariables } from '../lib/server-api';
 import { buildMessageFromTemplate } from '../lib/message-utils';
@@ -27,13 +28,6 @@ interface ConditionalRule {
   createdAt: string;
 }
 
-interface SavedTemplate {
-  id: string;
-  name: string;
-  content: string;
-  variableTitlePairs?: Array<{ id: string; variableName: string; title: string }>;
-}
-
 interface PreviewMatch {
   key: string;
   ruleId: string;
@@ -52,25 +46,6 @@ const CONDITION_LABELS: Record<ConditionType, string> = {
 
 const normalize = (value: string): string => value.trim().toLowerCase();
 
-const loadTemplates = (): SavedTemplate[] => {
-  try {
-    const raw = localStorage.getItem('messageTemplates');
-    const parsed = raw ? JSON.parse(raw) : [];
-    return Array.isArray(parsed) ? parsed : [];
-  } catch {
-    return [];
-  }
-};
-
-const loadRules = (): ConditionalRule[] => {
-  try {
-    const raw = localStorage.getItem('conditionalRules');
-    const parsed = raw ? JSON.parse(raw) : [];
-    return Array.isArray(parsed) ? parsed : [];
-  } catch {
-    return [];
-  }
-};
 
 export function ConditionalSender() {
   const { variables, refetch } = useFreeShowVariables();
@@ -78,8 +53,16 @@ export function ConditionalSender() {
   const { addLogs } = useMessageLogs();
   const toast = useToast();
 
-  const [templates, setTemplates] = useState<SavedTemplate[]>(loadTemplates);
-  const [rules, setRules] = useState<ConditionalRule[]>(loadRules);
+  // Templates + rules come from the receiver's database now (react-query).
+  const { templates, refetch: refetchTemplates } = useTemplates();
+  const {
+    rules,
+    create: createRuleApi,
+    update: updateRuleApi,
+    remove: removeRuleApi,
+    refetch: refetchRules,
+  } = useConditionalRules();
+
   const [preview, setPreview] = useState<PreviewMatch[] | null>(null);
   const [excludedKeys, setExcludedKeys] = useState<Set<string>>(new Set());
   const [dedupeContacts, setDedupeContacts] = useState(true);
@@ -89,15 +72,11 @@ export function ConditionalSender() {
   
   const [isPreviewing, startPreviewTransition] = useTransition();
 
-  useEffect(() => {
-    localStorage.setItem('conditionalRules', JSON.stringify(rules));
-  }, [rules]);
-
   const refreshData = useCallback(() => {
-    setTemplates(loadTemplates());
-    setRules(loadRules());
-    toast.info('Templates and rules refreshed from storage.', { title: 'Data Updated' });
-  }, [toast]);
+    void refetchTemplates();
+    void refetchRules();
+    toast.info('Templates and rules refreshed from the server.', { title: 'Data Updated' });
+  }, [toast, refetchTemplates, refetchRules]);
 
   const allVariables = useMemo(() => {
     const merged = new Map<string, { name: string; value: string }>();
@@ -132,28 +111,25 @@ export function ConditionalSender() {
   );
 
   const addRule = useCallback(() => {
-    setRules((prev) => [
-      ...prev,
-      {
-        id: Date.now().toString(),
-        variableName: variableEntries[0]?.name ?? '',
-        condition: 'name-equals',
-        templateId: templates[0]?.id ?? '',
-        createdAt: new Date().toISOString(),
-      },
-    ]);
+    void createRuleApi({
+      variableName: variableEntries[0]?.name ?? '',
+      condition: 'name-equals',
+      templateId: templates[0]?.id ?? '',
+    }).catch(() => {
+      toast.error('Could not add the rule. Is the server reachable?', { title: 'Server error' });
+    });
     setPreview(null);
-  }, [variableEntries, templates]);
+  }, [variableEntries, templates, createRuleApi, toast]);
 
   const updateRule = useCallback((id: string, patch: Partial<ConditionalRule>) => {
-    setRules((prev) => prev.map((r) => (r.id === id ? { ...r, ...patch } : r)));
+    void updateRuleApi(id, patch).catch(() => undefined);
     setPreview(null);
-  }, []);
+  }, [updateRuleApi]);
 
   const removeRule = useCallback((id: string) => {
-    setRules((prev) => prev.filter((r) => r.id !== id));
+    void removeRuleApi(id).catch(() => undefined);
     setPreview(null);
-  }, []);
+  }, [removeRuleApi]);
 
   const clearPreview = useCallback(() => {
     setPreview(null);

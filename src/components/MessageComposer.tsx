@@ -2,6 +2,7 @@ import React, { useEffect, useMemo, useState } from 'react';
 import { useFreeShowVariables } from '../hooks/useFreeShowVariables';
 import { useContacts } from '../hooks/useContacts';
 import { useMessageLogs } from '../hooks/useMessageLogs';
+import { useTemplates } from '../hooks/useServerData';
 import { semaphoreAPI } from '../lib/semaphore-api';
 import {
   buildMessageFromTemplate,
@@ -25,17 +26,7 @@ interface VariableTitlePair {
   id: string;
   variableName: string;
   title: string;
-  displayName: string;
-}
-
-interface MessageTemplate {
-  id: string;
-  name: string;
-  content: string;
-  variableTitlePairs: VariableTitlePair[];
-  assignedContactIds: string[]; // Array of contact IDs
-  createdAt: string;
-  updatedAt: string;
+  displayName?: string;
 }
 
 // Rough SMS segment estimate: 160 chars for a single GSM-7 segment,
@@ -52,11 +43,16 @@ export function MessageComposer() {
   const { addLogs } = useMessageLogs();
   const toast = useToast();
 
-  // Template management state
-  const [templates, setTemplates] = useState<MessageTemplate[]>(() => {
-    const saved = localStorage.getItem("messageTemplates");
-    return saved ? JSON.parse(saved) : [];
-  });
+  // Template management state.
+  // Templates live in the receiver's database now; the hook keeps them in
+  // react-query. Only the *unsaved draft* (message text + pairs) stays in
+  // localStorage, since it is ephemeral working state.
+  const {
+    templates,
+    create: createTemplateApi,
+    update: updateTemplateApi,
+    remove: deleteTemplateApi,
+  } = useTemplates();
   const [currentTemplateId, setCurrentTemplateId] = useState<string | null>(() => {
     return localStorage.getItem("currentTemplateId") || null;
   });
@@ -90,7 +86,7 @@ export function MessageComposer() {
   const [globalLayout, setGlobalLayout] = useState<MessageLayout>(loadGlobalLayout);
   const [isLayoutOpen, setIsLayoutOpen] = useState(false);
 
-  // Save pairs and template to localStorage
+  // Save pairs and the unsaved draft locally (ephemeral working state)
   useEffect(() => {
     localStorage.setItem("variableTitlePairs", JSON.stringify(variableTitlePairs));
   }, [variableTitlePairs]);
@@ -102,11 +98,6 @@ export function MessageComposer() {
   useEffect(() => {
     localStorage.setItem("messageTemplate", messageTemplate);
   }, [messageTemplate]);
-
-  // Save templates to localStorage
-  useEffect(() => {
-    localStorage.setItem("messageTemplates", JSON.stringify(templates));
-  }, [templates]);
 
   useEffect(() => {
     if (currentTemplateId) {
@@ -150,59 +141,63 @@ export function MessageComposer() {
   }, [activeTemplate, messageTemplate, variableTitlePairs, selectedContacts]);
 
   // Template management functions
-  const saveCurrentTemplate = () => {
+  const saveCurrentTemplate = async () => {
     const templateName = prompt('Enter template name:', `Template ${templates.length + 1}`);
     if (!templateName) return;
 
-    const newTemplate: MessageTemplate = {
-      id: Date.now().toString(),
-      name: templateName,
-      content: messageTemplate,
-      variableTitlePairs: variableTitlePairs,
-      assignedContactIds: selectedContacts, // Save current selected contacts
-      createdAt: new Date().toISOString(),
-      updatedAt: new Date().toISOString(),
-    };
+    try {
+      const newTemplate = await createTemplateApi({
+        name: templateName,
+        content: messageTemplate,
+        variableTitlePairs: variableTitlePairs,
+        assignedContactIds: selectedContacts, // Save current selected contacts
+      });
 
-    setTemplates([...templates, newTemplate]);
-    setCurrentTemplateId(newTemplate.id);
-    setStatus('success');
-    setStatusMessage(`Template "${templateName}" saved with ${selectedContacts.length} assigned contact(s)!`);
-    toast.info(`"${templateName}" saved with ${selectedContacts.length} contacts`, {
-      title: 'Template saved',
-    });
+      setCurrentTemplateId(newTemplate.id);
+      setStatus('success');
+      setStatusMessage(`Template "${templateName}" saved with ${selectedContacts.length} assigned contact(s)!`);
+      toast.info(`"${templateName}" saved with ${selectedContacts.length} contacts`, {
+        title: 'Template saved',
+      });
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Could not save the template.', {
+        title: 'Save failed',
+      });
+    }
   };
 
   // Save the current editor contents back into the actively-loaded template,
   // letting the user edit an existing template's message content in place.
-  const updateCurrentTemplate = () => {
+  const updateCurrentTemplate = async () => {
     if (!currentTemplateId) return;
     const activeTemplate = templates.find((t) => t.id === currentTemplateId);
     if (!activeTemplate) return;
 
-    const updatedTemplates = templates.map((t) =>
-      t.id === currentTemplateId
-        ? {
-            ...t,
-            content: messageTemplate,
-            variableTitlePairs,
-            assignedContactIds: selectedContacts,
-            updatedAt: new Date().toISOString(),
-          }
-        : t
-    );
-    setTemplates(updatedTemplates);
-    setStatus('success');
-    setStatusMessage(`Updated template "${activeTemplate.name}"`);
-    toast.success(`"${activeTemplate.name}" saved with your changes.`, { title: 'Template updated' });
+    try {
+      await updateTemplateApi(currentTemplateId, {
+        content: messageTemplate,
+        variableTitlePairs,
+        assignedContactIds: selectedContacts,
+      });
+      setStatus('success');
+      setStatusMessage(`Updated template "${activeTemplate.name}"`);
+      toast.success(`"${activeTemplate.name}" saved with your changes.`, { title: 'Template updated' });
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Could not update the template.', {
+        title: 'Update failed',
+      });
+    }
   };
 
-  const updateTemplateContacts = (templateId: string, contactIds: string[]) => {
-    setTemplates(templates.map(t =>
-      t.id === templateId
-        ? { ...t, assignedContactIds: contactIds, updatedAt: new Date().toISOString() }
-        : t
-    ));
+  const updateTemplateContacts = async (templateId: string, contactIds: string[]) => {
+    try {
+      await updateTemplateApi(templateId, { assignedContactIds: contactIds });
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Could not update contacts.', {
+        title: 'Update failed',
+      });
+      return;
+    }
     // Update current selection if this is the active template
     if (currentTemplateId === templateId) {
       setSelectedContacts(contactIds);
@@ -216,19 +211,17 @@ export function MessageComposer() {
   const loadTemplate = (templateId: string) => {
     const template = templates.find(t => t.id === templateId);
     if (template) {
-      // Save current state before switching
+      // Persist current editor contents back to the previously loaded
+      // template (best effort — the switch itself must not block).
       if (currentTemplateId) {
-        const updatedTemplates = templates.map(t =>
-          t.id === currentTemplateId
-            ? { ...t,
-                content: messageTemplate,
-                variableTitlePairs: variableTitlePairs,
-                assignedContactIds: selectedContacts,
-                updatedAt: new Date().toISOString()
-              }
-            : t
-        );
-        setTemplates(updatedTemplates);
+        const previous = templates.find((t) => t.id === currentTemplateId);
+        if (previous) {
+          void updateTemplateApi(currentTemplateId, {
+            content: messageTemplate,
+            variableTitlePairs: variableTitlePairs,
+            assignedContactIds: selectedContacts,
+          }).catch(() => undefined);
+        }
       }
 
       setCurrentTemplateId(templateId);
@@ -241,11 +234,17 @@ export function MessageComposer() {
     }
   };
 
-  const deleteTemplate = (templateId: string, e: React.MouseEvent) => {
+  const deleteTemplate = async (templateId: string, e: React.MouseEvent) => {
     e.stopPropagation();
     if (confirm('Are you sure you want to delete this template?')) {
-      const newTemplates = templates.filter(t => t.id !== templateId);
-      setTemplates(newTemplates);
+      try {
+        await deleteTemplateApi(templateId);
+      } catch (err) {
+        toast.error(err instanceof Error ? err.message : 'Could not delete the template.', {
+          title: 'Delete failed',
+        });
+        return;
+      }
       if (currentTemplateId === templateId) {
         setCurrentTemplateId(null);
         setMessageTemplate('');
@@ -256,19 +255,23 @@ export function MessageComposer() {
     }
   };
 
-  const duplicateTemplate = (templateId: string, e: React.MouseEvent) => {
+  const duplicateTemplate = async (templateId: string, e: React.MouseEvent) => {
     e.stopPropagation();
     const template = templates.find(t => t.id === templateId);
     if (template) {
-      const newTemplate: MessageTemplate = {
-        ...template,
-        id: Date.now().toString(),
-        name: `${template.name} (Copy)`,
-        createdAt: new Date().toISOString(),
-        updatedAt: new Date().toISOString(),
-      };
-      setTemplates([...templates, newTemplate]);
-      toast.info(`Created a copy of "${template.name}"`, { title: 'Template duplicated' });
+      try {
+        await createTemplateApi({
+          name: `${template.name} (Copy)`,
+          content: template.content,
+          variableTitlePairs: template.variableTitlePairs,
+          assignedContactIds: template.assignedContactIds || [],
+        });
+        toast.info(`Created a copy of "${template.name}"`, { title: 'Template duplicated' });
+      } catch (err) {
+        toast.error(err instanceof Error ? err.message : 'Could not duplicate the template.', {
+          title: 'Duplicate failed',
+        });
+      }
     }
   };
 
@@ -281,13 +284,15 @@ export function MessageComposer() {
     }
   };
 
-  const saveRename = (templateId: string) => {
+  const saveRename = async (templateId: string) => {
     if (editingTemplateName.trim()) {
-      setTemplates(templates.map(t =>
-        t.id === templateId
-          ? { ...t, name: editingTemplateName.trim(), updatedAt: new Date().toISOString() }
-          : t
-      ));
+      try {
+        await updateTemplateApi(templateId, { name: editingTemplateName.trim() });
+      } catch (err) {
+        toast.error(err instanceof Error ? err.message : 'Could not rename the template.', {
+          title: 'Rename failed',
+        });
+      }
     }
     setIsRenaming(null);
     setEditingTemplateName('');

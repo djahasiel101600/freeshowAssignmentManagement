@@ -31,7 +31,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 import httpx
-from fastapi import FastAPI, Header, HTTPException, Request
+from fastapi import Depends, FastAPI, Header, HTTPException, Request
 from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 
@@ -64,6 +64,19 @@ VARIABLES_FILE = DATA_DIR / "variables.json"
 COMMANDS_FILE = DATA_DIR / "commands.json"
 DIST_DIR = Path(os.environ.get("DIST_DIR", str(BASE_DIR.parent / "dist")))
 COMMAND_MAX_AGE_HOURS = float(os.environ.get("COMMAND_MAX_AGE_HOURS", "24"))
+
+# ---------------------------------------------------------------------------
+# Database-backed modules.
+# NOTE: imported *after* _load_env() because db.py resolves DATA_DIR and the
+# SQLite path at import time.
+# ---------------------------------------------------------------------------
+from db import get_db, init_db, session_scope  # noqa: E402
+from security import current_user, ensure_bootstrap_admin, purge_expired_sessions  # noqa: E402
+from services.assignment_service import record_snapshot  # noqa: E402
+from services.settings_service import tracking_config  # noqa: E402
+
+# API routers (auth/users, collections, assignments, rotation, settings/backup)
+from routers import ROUTERS  # noqa: E402
 
 logging.basicConfig(
     level=os.environ.get("LOG_LEVEL", "INFO").upper(),
@@ -203,7 +216,33 @@ def check_app_token(token: Optional[str]) -> None:
         raise HTTPException(status_code=401, detail="Invalid or missing app token")
 
 
-app = FastAPI(title="FreeShow SMS Manager Receiver", version="1.0.0")
+app = FastAPI(title="FreeShow SMS Manager Receiver", version="2.0.0")
+
+for _router in ROUTERS:
+    app.include_router(_router)
+
+
+@app.on_event("startup")
+def _startup() -> None:
+    """Create the schema, seed the first admin, and clean up old sessions."""
+    init_db()
+    db = session_scope()
+    try:
+        generated = ensure_bootstrap_admin(db)
+        if generated:
+            log.warning(
+                "No ADMIN_PASSWORD was set: created admin with a one-off password. "
+                "Sign in and change it now -> %s",
+                generated,
+            )
+        purged = purge_expired_sessions(db)
+        if purged:
+            log.info("Purged %d expired session(s)", purged)
+    except Exception as exc:  # noqa: BLE001
+        log.error("Database bootstrap failed: %s", exc)
+    finally:
+        db.close()
+    log.info("API routers mounted: %d", len(ROUTERS))
 
 proxy_client = httpx.AsyncClient(timeout=httpx.Timeout(20.0))
 
@@ -265,7 +304,31 @@ async def post_variables(
     changed = payload.get("changed") if isinstance(payload, dict) else None
     count = store.set_snapshot(variables, source=source, changed=changed)
     log.info("Snapshot stored: %d variables (source=%s, changed=%d)", count, source, len(changed or []))
-    return {"ok": True, "count": count, "updatedAt": store.get_snapshot()["updatedAt"]}
+
+    # Mirror the snapshot into the assignment ledger so schedule history keeps
+    # accumulating independently of the (ephemeral) variable snapshot.
+    ledger: Optional[dict[str, Any]] = None
+    db = session_scope()
+    try:
+        ledger = record_snapshot(
+            db,
+            variables=variables,
+            changed=changed or [],
+            source=f"bridge:{source or 'unknown'}",
+            tracking=tracking_config(db),
+            trigger=str(source or "snapshot"),
+        )
+    except Exception as exc:  # noqa: BLE001 - never fail the bridge because of this
+        log.error("Could not record assignments: %s", exc)
+    finally:
+        db.close()
+
+    return {
+        "ok": True,
+        "count": count,
+        "updatedAt": store.get_snapshot()["updatedAt"],
+        "assignments": ledger,
+    }
 
 
 @app.get("/api/variables")
@@ -324,14 +387,14 @@ async def ack_commands(
 
 
 @app.api_route("/semaphore/{path:path}", methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"])
-async def semaphore_proxy(path: str, request: Request) -> Response:
-    check_app_token(request.headers.get("x-app-token"))
+async def semaphore_proxy(
+    path: str, request: Request, _: Any = Depends(current_user)
+) -> Response:
     return await _forward(request, f"{SEMAPHORE_TARGET}/{path}")
 
 
 @app.api_route("/semaphore", methods=["GET", "POST"])
-async def semaphore_proxy_root(request: Request) -> Response:
-    check_app_token(request.headers.get("x-app-token"))
+async def semaphore_proxy_root(request: Request, _: Any = Depends(current_user)) -> Response:
     return await _forward(request, SEMAPHORE_TARGET)
 
 
@@ -339,11 +402,13 @@ if WEBHOOK_TARGET:
     webhook_prefix = WEBHOOK_PATH_PREFIX.rstrip("/")
 
     @app.api_route("/webhook/{path:path}", methods=["GET", "POST", "PUT", "DELETE"])
-    async def webhook_proxy(path: str, request: Request) -> Response:
+    async def webhook_proxy(
+        path: str, request: Request, _: Any = Depends(current_user)
+    ) -> Response:
         return await _forward(request, f"{WEBHOOK_TARGET}{webhook_prefix}/{path}")
 
     @app.api_route("/webhook", methods=["GET", "POST"])
-    async def webhook_proxy_root(request: Request) -> Response:
+    async def webhook_proxy_root(request: Request, _: Any = Depends(current_user)) -> Response:
         return await _forward(request, f"{WEBHOOK_TARGET}{webhook_prefix}")
 
 

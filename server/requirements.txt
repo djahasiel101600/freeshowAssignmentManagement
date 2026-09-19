@@ -1,3 +1,6 @@
 fastapi>=0.110
 uvicorn[standard]>=0.29
 httpx>=0.27
+# Persistence: SQLAlchemy 2.x over SQLite. The DB file lives in DATA_DIR, so it
+# is stored on the same named volume (freeshow-sms-server-data) as the JSON.
+SQLAlchemy>=2.0
