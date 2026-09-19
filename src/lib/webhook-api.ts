@@ -56,35 +56,28 @@ class WebhookAPI {
       }
     });
 
-    // Load config from localStorage
-    this.loadConfig();
+    // The config is persisted server-side (`app_settings.webhook`) and pushed
+    // in by the Settings panel via `setConfig()`. There is intentionally no
+    // localStorage read here — before Settings hydrates, pushes are simply
+    // disabled (config is null), which is the safe default.
   }
 
-  private loadConfig() {
-    try {
-      const saved = localStorage.getItem('webhook_config');
-      if (saved) {
-        this.config = JSON.parse(saved);
-        if (this.config) {
-          this.config.includeAllVariables = this.config.includeAllVariables !== undefined ? this.config.includeAllVariables : true;
-          this.config.batchUpdates = this.config.batchUpdates !== undefined ? this.config.batchUpdates : false;
-          this.config.batchWindow = this.config.batchWindow || 2000;
-          this.config.useProxy = this.config.useProxy !== undefined ? this.config.useProxy : true; // Default to using proxy
-        }
-      }
-    } catch (error) {
-      console.error('Error loading webhook config:', error);
-    }
-  }
-
-  setConfig(config: WebhookConfig) {
+  private normalize(config: WebhookConfig): WebhookConfig {
     config.includeAllVariables = config.includeAllVariables !== undefined ? config.includeAllVariables : true;
     config.batchUpdates = config.batchUpdates !== undefined ? config.batchUpdates : false;
     config.batchWindow = config.batchWindow || 2000;
     config.useProxy = config.useProxy !== undefined ? config.useProxy : true;
-    
+    return config;
+  }
+
+  /**
+   * Install a config in memory. Called with the saved server settings (to
+   * activate them without waiting for a manual Save) and with the draft when
+   * the user saves. Persistence itself is the caller's job (`save('webhook', …)`).
+   */
+  setConfig(config: WebhookConfig) {
+    this.normalize(config);
     this.config = config;
-    localStorage.setItem('webhook_config', JSON.stringify(config));
     this.lastError = null;
   }
 
@@ -402,7 +395,6 @@ class WebhookAPI {
   clearConfig() {
     this.config = null;
     this.lastError = null;
-    localStorage.removeItem('webhook_config');
     if (this.batchTimer) {
       clearTimeout(this.batchTimer);
       this.batchTimer = null;

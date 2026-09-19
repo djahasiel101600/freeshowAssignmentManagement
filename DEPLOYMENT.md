@@ -484,10 +484,31 @@ python3 freeshow_bridge.py \
 
 ## What is intentionally NOT included
 
-* No database — the receiver persists two JSON files.
-* No user accounts — a shared app token plus optional Cloudflare Access.
-* Contacts, templates, conditional rules and history stay in browser
-  `localStorage`; move them between browsers with **Settings → Data Management**.
-* No server-side n8n auto-forwarding yet (phase 2). The `/webhook/*` proxy
-  exists for parity, but the browser can also call your n8n URL directly.
+* No database server — the receiver uses a single embedded SQLite file in the
+  persisted volume (`DATA_DIR/freeshow.db`), so there is nothing extra to run.
+* No server-side n8n auto-forwarding. The `/webhook/*` proxy exists for
+  parity; variable events are pushed by the browser while it is open.
+
+### What changed from the earlier localStorage design
+
+Everything below used to live in the browser and now lives in the database —
+it survives a browser reset and follows the account across devices:
+
+* **Accounts & sessions** — username/password login (`/api/auth/*`), HttpOnly
+  session cookie, admin-managed users (Settings → Account).
+* **Contacts, templates, conditional rules, message history** — CRUD via
+  `/api/contacts`, `/api/templates`, `/api/rules`, `/api/logs`.
+* **Assignments & rotation history** — every FreeShow variable change is
+  recorded (`/api/assignments`, `/api/assignments/changes`), powering the
+  Assignments and Rotation tabs (who had the duty, how often, gaps).
+* **Settings** — Semaphore key, n8n webhook config, global message
+  layout, variable groups, the composer's unsaved draft, and tracking
+  options (`/api/settings`).
+* **Backups** — the Data tab downloads/imports everything as one JSON bundle
+  from the server (`/api/backup`); old localStorage-era backup files still
+  import.
+
+Only per-device preferences remain in the browser: theme, active tab, and
+the App Token used for the variable-command channel.
+
 ```

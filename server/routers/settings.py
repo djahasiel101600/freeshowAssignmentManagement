@@ -239,4 +239,3 @@ async def import_backup(
     db.commit()
     log.info("Backup imported by %s: %s", user.username, applied)
     return {"ok": True, "applied": applied}
-    return {"ok": True, "tracking": stored}

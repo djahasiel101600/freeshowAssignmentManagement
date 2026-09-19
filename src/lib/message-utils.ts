@@ -9,26 +9,25 @@ export interface MessageLayout {
   footer: string;
 }
 
-export const GLOBAL_MESSAGE_LAYOUT_KEY = 'globalMessageLayout';
+/**
+ * The global header/footer used to live in localStorage; it is a server
+ * setting (`app_settings.message_layout`) now. The module-level cache below is
+ * only a *mirror* of that setting so callers that build messages without an
+ * explicit `layout` argument (e.g. the conditional sender) still pick up the
+ * saved values. `useMessageLayout()` (hooks/useServerData.ts) hydrates the
+ * cache from the server and persists edits back to it.
+ */
+let cachedLayout: MessageLayout | null = null;
 
 export function loadGlobalLayout(): MessageLayout {
-  try {
-    const raw = localStorage.getItem(GLOBAL_MESSAGE_LAYOUT_KEY);
-    if (raw) {
-      const parsed = JSON.parse(raw);
-      return {
-        header: typeof parsed?.header === 'string' ? parsed.header : '',
-        footer: typeof parsed?.footer === 'string' ? parsed.footer : '',
-      };
-    }
-  } catch {
-    // ignore corrupted data
-  }
-  return { header: '', footer: '' };
+  return cachedLayout ?? { header: '', footer: '' };
 }
 
 export function saveGlobalLayout(layout: MessageLayout): void {
-  localStorage.setItem(GLOBAL_MESSAGE_LAYOUT_KEY, JSON.stringify(layout));
+  cachedLayout = {
+    header: typeof layout?.header === 'string' ? layout.header : '',
+    footer: typeof layout?.footer === 'string' ? layout.footer : '',
+  };
 }
 
 export interface BuildMessageInput {
@@ -41,9 +40,10 @@ export interface BuildMessageInput {
    */
   overrides?: Record<string, string>;
   /**
-   * Global header/footer applied around every message. Defaults to whatever
-   * is saved in localStorage (so the composer, conditional sender, and any
-   * other caller stay in sync). Pass `null` to skip the layout entirely.
+   * Global header/footer applied around every message. Defaults to the cached
+   * server setting (hydrated by `useMessageLayout`, so the composer,
+   * conditional sender, and any other caller stay in sync). Pass `null` to
+   * skip the layout entirely.
    */
   layout?: MessageLayout | null;
 }

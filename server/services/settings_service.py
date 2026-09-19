@@ -58,15 +58,27 @@ DEFAULTS: dict[str, Any] = {
         "batchUpdates": False,
         "batchWindow": 2000,
     },
+    # Unsaved composer working state (message text, title/value pairs, the
+    # template being edited). Kept server-side so a half-written message follows
+    # the account instead of a single browser profile.
     "composer_draft": {"messageTemplate": "", "variableTitlePairs": [], "templateId": None},
+    # Global header/footer wrapped around every built message.
+    "message_layout": {"header": "", "footer": ""},
+    # Saved variable-groups layout (the Variables Manager). Stored as the list
+    # the frontend sends (array of {id,name,variableIds,expanded}).
+    "variable_groups": [],
 }
 
 
 def _default_for(key: str) -> Any:
     value = DEFAULTS.get(key)
-    # Deep-ish copy so callers can't mutate the module-level default.
+    # Deep-ish copy so callers can't mutate the module-level default. Lists
+    # matter too: `variable_groups` defaults to [] and a caller that appends to
+    # what it got back would otherwise pollute the default for the process.
     if isinstance(value, dict):
         return {k: (list(v) if isinstance(v, list) else v) for k, v in value.items()}
+    if isinstance(value, list):
+        return list(value)
     return value
 
 

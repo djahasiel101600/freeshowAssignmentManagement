@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { useFreeShowVariables } from '../hooks/useFreeShowVariables';
 import { useContacts } from '../hooks/useContacts';
+import { useAppSettings } from '../hooks/useServerData';
 import { Card, CardHeader, CardTitle, CardContent } from './ui/card';
 import { Button } from './ui/button';
 import { Input } from './ui/input';
@@ -62,21 +63,46 @@ export function VariablesManager() {
   const [draggingId, setDraggingId] = useState<string | null>(null);
   const searchInputRef = useRef<HTMLInputElement>(null);
 
-  // Group management state
-  const [groups, setGroups] = useState<VariableGroup[]>(() => {
-    const saved = localStorage.getItem('variableGroups');
-    return saved ? JSON.parse(saved) : [];
-  });
+  // Group management state.
+  //
+  // The layout is a *setting* (`app_settings.variable_groups`), not browser
+  // state: it used to live in localStorage, which meant a new device (or a
+  // cleared cache) silently lost every group. We hydrate from the server once,
+  // then write back on every change.
+  const { settings, save: saveSetting } = useAppSettings();
+  const [groups, setGroups] = useState<VariableGroup[]>([]);
+  const hydratedRef = useRef(false);
+  // Suppress the first persist run: it fires as a consequence of hydrating,
+  // not because the user changed anything.
+  const skipPersistRef = useRef(true);
   const [isCreatingGroup, setIsCreatingGroup] = useState(false);
   const [newGroupName, setNewGroupName] = useState('');
   const [editingGroupId, setEditingGroupId] = useState<string | null>(null);
   const [editingGroupName, setEditingGroupName] = useState('');
   const [showUnassigned, setShowUnassigned] = useState(true);
 
-  // Save groups to localStorage
+  // Hydrate once the settings query resolves.
   useEffect(() => {
-    localStorage.setItem('variableGroups', JSON.stringify(groups));
-  }, [groups]);
+    if (hydratedRef.current || !settings) return;
+    const stored = settings.variable_groups;
+    if (Array.isArray(stored)) {
+      setGroups(stored as VariableGroup[]);
+    }
+    hydratedRef.current = true;
+    skipPersistRef.current = true;
+  }, [settings]);
+
+  // Persist changes back to the server.
+  useEffect(() => {
+    if (!hydratedRef.current) return;
+    if (skipPersistRef.current) {
+      skipPersistRef.current = false;
+      return;
+    }
+    void saveSetting('variable_groups', groups).catch(() => {
+      toastError('Could not save the group layout to the server.', { title: 'Save failed' });
+    });
+  }, [groups, saveSetting, toastError]);
 
   // Group management functions
   const createGroup = () => {

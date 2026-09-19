@@ -1,15 +1,10 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { useFreeShowVariables } from '../hooks/useFreeShowVariables';
 import { useContacts } from '../hooks/useContacts';
 import { useMessageLogs } from '../hooks/useMessageLogs';
-import { useTemplates } from '../hooks/useServerData';
+import { useAppSettings, useMessageLayout, useTemplates } from '../hooks/useServerData';
 import { semaphoreAPI } from '../lib/semaphore-api';
-import {
-  buildMessageFromTemplate,
-  loadGlobalLayout,
-  saveGlobalLayout,
-  type MessageLayout,
-} from '../lib/message-utils';
+import { buildMessageFromTemplate } from '../lib/message-utils';
 import { Card, CardHeader, CardTitle, CardContent } from './ui/card';
 import { Button } from './ui/button';
 import { Label } from './ui/label';
@@ -45,17 +40,17 @@ export function MessageComposer() {
 
   // Template management state.
   // Templates live in the receiver's database now; the hook keeps them in
-  // react-query. Only the *unsaved draft* (message text + pairs) stays in
-  // localStorage, since it is ephemeral working state.
+  // react-query. The *unsaved draft* (message text + pairs + selected
+  // template) is persisted server-side too (`app_settings.composer_draft`),
+  // so a half-written message follows the account across devices.
   const {
     templates,
     create: createTemplateApi,
     update: updateTemplateApi,
     remove: deleteTemplateApi,
   } = useTemplates();
-  const [currentTemplateId, setCurrentTemplateId] = useState<string | null>(() => {
-    return localStorage.getItem("currentTemplateId") || null;
-  });
+  const { settings: appSettings, save: saveDraftSetting } = useAppSettings();
+  const [currentTemplateId, setCurrentTemplateId] = useState<string | null>(null);
   const [isTemplateManagerOpen, setIsTemplateManagerOpen] = useState(false);
   const [editingTemplateName, setEditingTemplateName] = useState('');
   const [isRenaming, setIsRenaming] = useState<string | null>(null);
@@ -63,14 +58,60 @@ export function MessageComposer() {
   const [templateSearchTerm, setTemplateSearchTerm] = useState('');
 
   // Current template state
-  const [messageTemplate, setMessageTemplate] = useState(() => {
-    const saved = localStorage.getItem("messageTemplate");
-    return saved || "";
-  });
-  const [variableTitlePairs, setVariableTitlePairs] = useState<VariableTitlePair[]>(() => {
-    const saved = localStorage.getItem("variableTitlePairs");
-    return saved ? JSON.parse(saved) : [];
-  });
+  const [messageTemplate, setMessageTemplate] = useState("");
+  const [variableTitlePairs, setVariableTitlePairs] = useState<VariableTitlePair[]>([]);
+
+  const draftHydratedRef = useRef(false);
+  // What the server last had, so the persist effect neither re-writes on
+  // mount nor fires a request per keystroke.
+  const draftSavedRef = useRef<string | null>(null);
+  // The template whose content was last loaded into the editor. Seeded at
+  // hydration so restoring a draft does not trigger the "switch template"
+  // effect and clobber the unsaved text with the saved template content.
+  const appliedTemplateRef = useRef<string | null>(null);
+
+  // Pull the saved draft + layout into the editor once.
+  useEffect(() => {
+    if (draftHydratedRef.current || !appSettings) return;
+    draftHydratedRef.current = true;
+    const draft = appSettings.composer_draft as
+      | { messageTemplate?: string; variableTitlePairs?: VariableTitlePair[]; templateId?: string | null }
+      | undefined;
+    const draftTemplate = draft?.messageTemplate ?? '';
+    const draftPairs = Array.isArray(draft?.variableTitlePairs) ? draft!.variableTitlePairs : [];
+    const draftId = draft?.templateId ?? null;
+    setMessageTemplate(draftTemplate);
+    setVariableTitlePairs(draftPairs);
+    setCurrentTemplateId(draftId);
+    appliedTemplateRef.current = draftId;
+    draftSavedRef.current = JSON.stringify({
+      messageTemplate: draftTemplate,
+      variableTitlePairs: draftPairs,
+      templateId: draftId,
+    });
+  }, [appSettings]);
+
+  // Persist the draft (debounced; skipped when unchanged).
+  useEffect(() => {
+    if (!draftHydratedRef.current) return;
+    const snapshot = JSON.stringify({
+      messageTemplate,
+      variableTitlePairs,
+      templateId: currentTemplateId,
+    });
+    if (snapshot === draftSavedRef.current) return;
+    const timer = window.setTimeout(() => {
+      draftSavedRef.current = snapshot;
+      void saveDraftSetting('composer_draft', {
+        messageTemplate,
+        variableTitlePairs,
+        templateId: currentTemplateId,
+      }).catch(() => {
+        draftSavedRef.current = null; // retry on the next edit
+      });
+    }, 600);
+    return () => window.clearTimeout(timer);
+  }, [messageTemplate, variableTitlePairs, currentTemplateId, saveDraftSetting]);
 
   const [selectedContacts, setSelectedContacts] = useState<string[]>([]);
   const [contactSearchTerm, setContactSearchTerm] = useState('');
@@ -83,39 +124,21 @@ export function MessageComposer() {
   const [insertTab, setInsertTab] = useState<'variables' | 'pairs'>('variables');
 
   // Global header/footer applied to every message built from a template
-  const [globalLayout, setGlobalLayout] = useState<MessageLayout>(loadGlobalLayout);
+  const { layout: globalLayout, setLayout: setGlobalLayout } = useMessageLayout();
   const [isLayoutOpen, setIsLayoutOpen] = useState(false);
 
-  // Save pairs and the unsaved draft locally (ephemeral working state)
+  // Load template when switching (user action — hydration is excluded via
+  // appliedTemplateRef, which is seeded with the restored template id).
   useEffect(() => {
-    localStorage.setItem("variableTitlePairs", JSON.stringify(variableTitlePairs));
-  }, [variableTitlePairs]);
-
-  useEffect(() => {
-    saveGlobalLayout(globalLayout);
-  }, [globalLayout]);
-
-  useEffect(() => {
-    localStorage.setItem("messageTemplate", messageTemplate);
-  }, [messageTemplate]);
-
-  useEffect(() => {
-    if (currentTemplateId) {
-      localStorage.setItem("currentTemplateId", currentTemplateId);
-    }
-  }, [currentTemplateId]);
-
-  // Load template when switching
-  useEffect(() => {
-    if (currentTemplateId) {
-      const template = templates.find(t => t.id === currentTemplateId);
-      if (template) {
-        setMessageTemplate(template.content);
-        setVariableTitlePairs(template.variableTitlePairs);
-        // Auto-select assigned contacts for this template
-        setSelectedContacts(template.assignedContactIds || []);
-      }
-    }
+    if (!currentTemplateId) return;
+    if (appliedTemplateRef.current === currentTemplateId) return;
+    const template = templates.find(t => t.id === currentTemplateId);
+    if (!template) return; // not fetched yet; applies once templates arrive
+    appliedTemplateRef.current = currentTemplateId;
+    setMessageTemplate(template.content);
+    setVariableTitlePairs(template.variableTitlePairs);
+    // Auto-select assigned contacts for this template
+    setSelectedContacts(template.assignedContactIds || []);
   }, [currentTemplateId, templates]);
 
   const insertVariable = (variableName: string) => {

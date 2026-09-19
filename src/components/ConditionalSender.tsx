@@ -2,7 +2,7 @@ import { useCallback, useMemo, useState, useTransition } from 'react';
 import { useFreeShowVariables } from '../hooks/useFreeShowVariables';
 import { useContacts } from '../hooks/useContacts';
 import { useMessageLogs } from '../hooks/useMessageLogs';
-import { useConditionalRules, useTemplates } from '../hooks/useServerData';
+import { useConditionalRules, useMessageLayout, useTemplates } from '../hooks/useServerData';
 import { semaphoreAPI } from '../lib/semaphore-api';
 import { getCachedServerVariables } from '../lib/server-api';
 import { buildMessageFromTemplate } from '../lib/message-utils';
@@ -55,6 +55,8 @@ export function ConditionalSender() {
 
   // Templates + rules come from the receiver's database now (react-query).
   const { templates, refetch: refetchTemplates } = useTemplates();
+  // Same global header/footer the composer uses (shared server setting).
+  const { layout: globalLayout } = useMessageLayout();
   const {
     rules,
     create: createRuleApi,
@@ -212,6 +214,7 @@ export function ConditionalSender() {
                 variables: allVariables,
                 variableTitlePairs: template.variableTitlePairs,
                 overrides: { [rule.variableName]: value },
+                layout: globalLayout,
               });
             } catch (err) {
               console.error('Failed to build message for contact', contact.id, err);
@@ -240,7 +243,7 @@ export function ConditionalSender() {
         setPreviewWarning(`${missingTemplates} rule(s) referenced a missing or empty template and were skipped.`);
       }
     });
-  }, [rules, templates, contacts, variableEntries, allVariables, dedupeContacts, toast, startPreviewTransition]);
+  }, [rules, templates, contacts, variableEntries, allVariables, dedupeContacts, globalLayout, toast, startPreviewTransition]);
 
   const handleSend = useCallback(async () => {
     if (includedMatches.length === 0) {

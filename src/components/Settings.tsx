@@ -48,9 +48,9 @@ export function Settings() {
       });
     }
     const webhook = settings.webhook as Partial<WebhookConfig> | undefined;
-    if (webhook) {
-      setWebhookConfig({ ...DEFAULT_WEBHOOK_CONFIG, ...webhook });
-    }
+    setWebhookConfig({ ...DEFAULT_WEBHOOK_CONFIG, ...(webhook ?? {}) });
+    // Note: the semaphore/webhook *clients* are activated in useAppSettings so
+    // they work even if this panel is never opened. Here we only fill drafts.
   }, [settings, integrationsLoaded]);
 
   const [connectionStatus, setConnectionStatus] = useState<'testing' | 'connected' | 'disconnected' | 'idle'>('idle');
