@@ -140,6 +140,7 @@ export function AssignmentsPanel() {
                 onChange={(e) => setForm({ ...form, date: e.target.value })}
               />
               <p className="text-xs text-muted-foreground">Leave empty for today.</p>
+            </div>
             <div className="space-y-2">
               <Label htmlFor="assign-schedule-date">Service date (optional)</Label>
               <Input
