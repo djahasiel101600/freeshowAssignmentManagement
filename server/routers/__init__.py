@@ -7,13 +7,14 @@ on the bridge receiver + reverse proxies.
 
 from __future__ import annotations
 
-from routers import assignments, auth, collections, rotation, settings
+from routers import assignments, auth, collections, rotation, schedules, settings
 
 ROUTERS = (
     auth.router,
     collections.router,
     assignments.router,
     rotation.router,
+    schedules.router,
     settings.router,
 )
 

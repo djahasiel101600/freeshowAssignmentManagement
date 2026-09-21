@@ -4,6 +4,7 @@ import { Button } from './ui/button';
 import { Label } from './ui/label';
 import { useToast } from './ui/toast';
 import { useRotation, useRotationVariables, useTracking } from '../hooks/useScheduleData';
+import { ScheduleRulesCard, formatIsoDate } from './ScheduleRulesCard';
 import type { CycleInfo, RotationOverviewRow } from '../types/assignments';
 import {
   AlertCircle, CalendarClock, CheckCircle2, Loader2, RefreshCw, Repeat, Save, Users,
@@ -16,6 +17,10 @@ import { cn } from '../lib/utils';
  * Answers two questions from the assignment ledger: does a variable repeat on
  * a regular cycle, and who is expected next. The ledger itself is filled by
  * the bridge; this panel only reads what the receiver has already recorded.
+ *
+ * The dates used here are *service* dates: when a variable has a recurring
+ * schedule (see the Recurring schedules card) each recorded entry is counted on
+ * the service it was entered for.
  */
 
 function describeCycle(cycle: CycleInfo | undefined | null): string {
@@ -81,10 +86,24 @@ function OverviewRow({ row, onOpen }: { row: RotationOverviewRow; onOpen: (name:
       <td className="py-2 pr-3 text-sm text-muted-foreground">{row.totalAssignments}</td>
       <td className="py-2 pr-3 text-sm text-muted-foreground">{row.distinctPeople}</td>
       <td className="py-2 pr-3 text-sm text-muted-foreground">{row.lastDate ?? '—'}</td>
-      <td className="py-2 pr-3 text-sm">{describeCycle(row.cycle)}</td>
+      <td className="py-2 pr-3 text-sm">
+        <div>{describeCycle(row.cycle)}</div>
+        <div className="text-xs text-muted-foreground">
+          {row.schedule?.configured
+            ? `${row.schedule.description} · next ${formatIsoDate(row.schedule.nextOccurrence)}`
+            : 'no recurring day set'}
+        </div>
+      </td>
       <td className="py-2 text-sm">
         {row.nextExpected?.name ? (
-          <span className="font-medium">{row.nextExpected.name}</span>
+          <span className="font-medium">
+            {row.nextExpected.name}
+            {row.nextExpected.predictedNextDate && (
+              <span className="ml-1 text-xs font-normal text-muted-foreground">
+                {formatIsoDate(row.nextExpected.predictedNextDate)}
+              </span>
+            )}
+          </span>
         ) : (
           <span className="text-muted-foreground">—</span>
         )}
@@ -211,6 +230,9 @@ export function RotationPanel() {
       {/* ---- what gets tracked ---- */}
       <TrackingConfigCard />
 
+      {/* ---- when it happens ---- */}
+      <ScheduleRulesCard />
+
       {/* ---- overview of every tracked variable ---- */}
       <Card>
         <CardHeader>
@@ -237,7 +259,7 @@ export function RotationPanel() {
                     <th className="py-2 pr-3 font-medium">Entries</th>
                     <th className="py-2 pr-3 font-medium">People</th>
                     <th className="py-2 pr-3 font-medium">Last</th>
-                    <th className="py-2 pr-3 font-medium">Cycle</th>
+                    <th className="py-2 pr-3 font-medium">Cycle / schedule</th>
                     <th className="py-2 font-medium">Next expected</th>
                   </tr>
                 </thead>
@@ -305,17 +327,82 @@ export function RotationPanel() {
                     · usually {report.dominantWeekday.weekday} ({Math.round(report.dominantWeekday.share * 100)}%)
                   </span>
                 )}
+                {report.entryWeekday && (
+                  <span className="text-sm text-muted-foreground">
+                    · entered on {report.entryWeekday.weekday}s
+                  </span>
+                )}
+                <span className="text-sm text-muted-foreground">
+                  · {report.totalAssignments} service{report.totalAssignments === 1 ? '' : 's'}
+                  {report.recordedAssignments != null && report.recordedAssignments !== report.totalAssignments
+                    ? ` from ${report.recordedAssignments} recorded entr${report.recordedAssignments === 1 ? 'y' : 'ies'}`
+                    : ''}
+                </span>
               </div>
               <CycleChips cycle={report.cycle} />
+
+              {report.schedule?.configured ? (
+                <div className="space-y-1 rounded-lg border p-3 text-sm">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <span className="inline-flex items-center gap-1 font-medium">
+                      <Repeat className="h-3.5 w-3.5" />
+                      {report.schedule.description}
+                    </span>
+                    <span className="rounded-full bg-primary/10 px-2 py-0.5 text-xs font-medium text-primary">
+                      next {formatIsoDate(report.schedule.nextOccurrence)}
+                    </span>
+                    {report.schedule.leadDays != null && (
+                      <span className="text-xs text-muted-foreground">
+                        entered{' '}
+                        {report.schedule.leadDays === 0
+                          ? 'on the service day'
+                          : `${report.schedule.leadDays} day${report.schedule.leadDays === 1 ? '' : 's'} before`}
+                      </span>
+                    )}
+                  </div>
+                  <p className="text-xs text-muted-foreground">
+                    Following:{' '}
+                    {report.schedule.upcoming.slice(1).map((day) => formatIsoDate(day)).join(' · ') || '—'}
+                    {report.entryWeekday ? ` · entries recorded on ${report.entryWeekday.weekday}` : ''}
+                  </p>
+                  {report.schedule.recentMappings && report.schedule.recentMappings.length > 0 && (
+                    <p className="text-xs text-muted-foreground">
+                      Recorded → service:{' '}
+                      {report.schedule.recentMappings
+                        .map((mapping) => `${mapping.recorded} → ${mapping.serviceDate}`)
+                        .join(' · ')}
+                    </p>
+                  )}
+                </div>
+              ) : (
+                <div className="flex items-start gap-2 rounded-lg bg-yellow-500/10 p-3 text-sm text-yellow-700">
+                  <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" />
+                  <span>
+                    No recurring day is set for this variable, so the dates above are the days the
+                    schedule was <em>recorded</em> and &ldquo;next&rdquo; cannot land on a specific
+                    service yet. Set it under <span className="font-medium">Recurring schedules</span>{' '}
+                    above.
+                  </span>
+                </div>
+              )}
 
               {report.nextExpected?.name && (
                 <div className="rounded-lg bg-muted/40 p-3 text-sm">
                   <span className="font-medium">Next expected:</span> {report.nextExpected.name}
                   {report.nextExpected.predictedNextDate && (
-                    <span className="text-muted-foreground"> around {report.nextExpected.predictedNextDate}</span>
+                    <span className="text-muted-foreground">
+                      {' '}
+                      on {formatIsoDate(report.nextExpected.predictedNextDate)}
+                    </span>
                   )}
                   {report.nextExpected.basis && (
-                    <span className="text-muted-foreground"> ({report.nextExpected.basis})</span>
+                    <span className="text-muted-foreground"> ({report.nextExpected.basis.replace(/-/g, ' ')})</span>
+                  )}
+                  {report.nextExpected.confidence != null && (
+                    <span className="text-muted-foreground">
+                      {' '}
+                      · {Math.round(report.nextExpected.confidence * 100)}% consistent
+                    </span>
                   )}
                 </div>
               )}

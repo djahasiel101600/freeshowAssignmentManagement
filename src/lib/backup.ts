@@ -7,7 +7,7 @@
  * everything lived in localStorage, so old backup files still import.
  */
 
-export type DataKind = 'templates' | 'contacts' | 'rules' | 'logs';
+export type DataKind = 'templates' | 'contacts' | 'rules' | 'logs' | 'schedules';
 
 export interface BackupBundle {
   app: string;

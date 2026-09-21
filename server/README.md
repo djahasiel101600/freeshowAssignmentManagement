@@ -95,6 +95,53 @@ curl -s -o /dev/null -w '%{http_code}\n' -X POST http://127.0.0.1:8000/api/comma
 # 401
 ```
 
+## Recurring schedules (service-date anchoring)
+
+Assignments are recorded on the day the operator (or the bridge) types them in —
+usually **Sunday, before the service ends**, while the duty itself happens the
+following **Friday / Saturday / Sunday**. Predicting the next turn from the raw
+recorded dates alone drifts by that offset, so each tracked variable can now
+have a **schedule rule** that anchors every ledger entry to the real service
+date:
+
+```
+service date = first occurrence of the rule's weekday(s)
+               on the rule's weekly/every-N-weeks ladder
+               that is >= recorded date + leadDays
+```
+
+* `weekdays` — `0 = Monday … 6 = Sunday`; `[6]` is "every Sunday", `[4]` every
+  Friday, `[5]` every Saturday.
+* `intervalWeeks` — 1 = weekly, 2 = bi-weekly …; `anchorDate` pins the phase
+  (any real occurrence date that falls on one of the weekdays).
+* `leadDays` — how many days before the service the schedule is entered
+  (default 1: entered Sunday → next Sunday's service; `0` = same day).
+* A row can always **pin** its own `scheduleDate`, which wins over the rule.
+
+### Endpoints
+
+| Endpoint | Purpose |
+|---|---|
+| `GET /api/schedules` | All rules + server-resolved next/previous occurrence, 4-date preview, entry pattern vs the ledger |
+| `PUT /api/schedules/{variable}` | Create/update the rule for one variable (validated; anchor normalised) |
+| `DELETE /api/schedules/{variable}` | Remove the rule (entries fall back to recorded dates) |
+| `POST /api/schedules/backfill` | Rewrite `assignments.schedule_date` for past rows (`dryRun: true` previews first) |
+
+`GET /api/assignments` rows now also return `scheduleDate`, `effectiveDate` and
+`scheduleSource` (`pinned` / `rule` / `recorded`), and the rotation report's
+`nextExpected` is anchored on rule dates when a rule exists.
+
+### Persistence & migration
+
+* Rules live in the `assignment_schedules` table (one row per variable).
+* The `assignments` table gained a nullable `schedule_date` column.
+* **No manual migration step**: `init_db()` adds the table/column with an
+  idempotent `ALTER TABLE` guard on startup, so an existing `data/freeshow.db`
+  upgrades in place and the first run after the update is safe to keep.
+* `schedules` is part of the `/api/backup` bundle, so rules survive
+  export/import like every other section.
+
+
 ## Persistence
 
 `data/variables.json` and `data/commands.json` are written atomically

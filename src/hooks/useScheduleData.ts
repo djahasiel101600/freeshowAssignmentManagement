@@ -1,5 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import * as store from '../lib/store-api';
+import type { ScheduleRuleInput } from '../types/assignments';
 
 /**
  * Assignment ledger + rotation analysis hooks.
@@ -107,6 +108,73 @@ export function useRotationPeople(variable?: string) {
     error: query.error,
     refetch: query.refetch,
   };
+}
+
+// --------------------------------------------------------------------------- //
+// Recurring schedules
+// --------------------------------------------------------------------------- //
+/**
+ * The calendar behind the rotation analysis.
+ *
+ * A variable's assignments repeat on a regular weekday ("every Sunday") that the
+ * operator declares here; the server then knows which service each recorded
+ * entry is *for*, so the prediction lands on a Friday/Saturday/Sunday instead of
+ * on the evening the schedule was typed in.
+ */
+export function useSchedules() {
+  const query = useQuery({
+    queryKey: ['schedules'],
+    queryFn: store.fetchSchedules,
+    staleTime: 30_000,
+  });
+  return {
+    schedules: query.data ?? [],
+    isLoading: query.isLoading,
+    error: query.error,
+    refetch: query.refetch,
+  };
+}
+
+export function useSaveSchedule() {
+  const queryClient = useQueryClient();
+  const mutation = useMutation({
+    mutationFn: ({ variableName, rule }: { variableName: string; rule: ScheduleRuleInput }) =>
+      store.putSchedule(variableName, rule),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['schedules'] });
+      queryClient.invalidateQueries({ queryKey: ['rotation'] });
+      queryClient.invalidateQueries({ queryKey: ['assignments'] });
+    },
+  });
+  return { saveSchedule: mutation.mutateAsync, isSaving: mutation.isPending };
+}
+
+export function useDeleteSchedule() {
+  const queryClient = useQueryClient();
+  const mutation = useMutation({
+    mutationFn: store.deleteSchedule,
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['schedules'] });
+      queryClient.invalidateQueries({ queryKey: ['rotation'] });
+      queryClient.invalidateQueries({ queryKey: ['assignments'] });
+    },
+  });
+  return { deleteSchedule: mutation.mutateAsync, isDeleting: mutation.isPending };
+}
+
+export function useBackfillSchedules() {
+  const queryClient = useQueryClient();
+  const mutation = useMutation({
+    mutationFn: store.backfillSchedules,
+    onSuccess: (result) => {
+      // A dry run changes nothing, so leave the caches alone.
+      if (result.dryRun) return;
+      queryClient.invalidateQueries({ queryKey: ['schedules'] });
+      queryClient.invalidateQueries({ queryKey: ['rotation'] });
+      queryClient.invalidateQueries({ queryKey: ['assignments'] });
+    },
+  });
+  return { backfillSchedules: mutation.mutateAsync, isApplying: mutation.isPending };
 }
 
 // --------------------------------------------------------------------------- //

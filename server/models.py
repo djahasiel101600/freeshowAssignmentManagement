@@ -30,7 +30,7 @@ from sqlalchemy import (
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from db import Base
-from timeutil import utc_now_iso
+from timeutil import WEEKDAY_NAMES, utc_now_iso
 
 
 def new_id() -> str:
@@ -219,6 +219,13 @@ class Assignment(Base):
 
     id: Mapped[str] = mapped_column(String(32), primary_key=True, default=new_id)
     assignment_date: Mapped[str] = mapped_column(String(10), index=True)
+    # The *service date* this entry belongs to (YYYY-MM-DD), when someone knows
+    # it explicitly. NULL - the normal case for bridge-written rows - means
+    # "derive it from the variable's recurring schedule rule at read time", so
+    # correcting a rule also corrects the interpretation of past entries.
+    schedule_date: Mapped[Optional[str]] = mapped_column(
+        String(10), nullable=True, index=True
+    )
     variable_id: Mapped[str] = mapped_column(String(64), index=True)
     variable_name: Mapped[str] = mapped_column(String(160), index=True)
     value: Mapped[str] = mapped_column(String(500), default="")
@@ -237,6 +244,7 @@ class Assignment(Base):
         return {
             "id": self.id,
             "date": self.assignment_date,
+            "scheduleDate": self.schedule_date,
             "variableId": self.variable_id,
             "variableName": self.variable_name,
             "value": self.value or "",
@@ -365,6 +373,64 @@ class ScheduleEventAssignment(Base):
             "eventId": self.event_id,
             "assignmentId": self.assignment_id,
             "createdAt": self.created_at,
+        }
+
+
+class AssignmentScheduleRule(Base):
+    """
+    The recurring calendar one assignment variable follows.
+
+    The bridge can only report *when it saw a value change*, which for this
+    church is the Sunday evening the next week's schedule is typed in - not the
+    service date the assignment is for. A rule supplies the missing calendar:
+
+    * ``weekdays``       - which day(s) the assignment is *for*
+                           (0 = Monday ... 6 = Sunday, so [4] = every Friday),
+    * ``interval_weeks`` - every week, every other week, ...,
+    * ``anchor_date``    - one real occurrence, which fixes the phase of the
+                           interval, and
+    * ``lead_days``      - how many days before the service the schedule is
+                           entered, so a row recorded on 2026-09-20 maps to the
+                           service it was entered for (default 1 = "the next
+                           upcoming occurrence").
+
+    Rotation analysis turns that into a real service date, which is what makes
+    "who is next, and when" land on a Friday/Saturday/Sunday instead of on
+    whatever day the schedule happened to be typed in.
+    """
+
+    __tablename__ = "assignment_schedules"
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=new_id)
+    variable_name: Mapped[str] = mapped_column(String(160), unique=True, index=True)
+    label: Mapped[str] = mapped_column(String(200), default="")
+    weekdays: Mapped[list[int]] = mapped_column(JSON, default=list)
+    interval_weeks: Mapped[int] = mapped_column(default=1)
+    anchor_date: Mapped[str] = mapped_column(String(10), default="")
+    lead_days: Mapped[int] = mapped_column(default=1)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    notes: Mapped[str] = mapped_column(Text, default="")
+    created_at: Mapped[str] = mapped_column(String(40), default=utc_now_iso)
+    updated_at: Mapped[str] = mapped_column(String(40), default=utc_now_iso)
+    created_by: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
+
+    def weekday_labels(self) -> list[str]:
+        return [WEEKDAY_NAMES[day] for day in sorted(self.weekdays or []) if 0 <= day <= 6]
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "id": self.id,
+            "variableName": self.variable_name,
+            "label": self.label or "",
+            "weekdays": sorted(self.weekdays or []),
+            "weekdayLabels": self.weekday_labels(),
+            "intervalWeeks": int(self.interval_weeks or 1),
+            "anchorDate": self.anchor_date or "",
+            "leadDays": int(self.lead_days or 0),
+            "enabled": bool(self.enabled),
+            "notes": self.notes or "",
+            "createdAt": self.created_at,
+            "updatedAt": self.updated_at,
         }
 
 

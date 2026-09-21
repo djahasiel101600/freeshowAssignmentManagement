@@ -42,7 +42,7 @@ export function AssignmentsPanel() {
 
   // --- manual entry form -------------------------------------------------- //
   const [showForm, setShowForm] = useState(false);
-  const [form, setForm] = useState({ date: '', variableId: '', value: '', note: '' });
+  const [form, setForm] = useState({ date: '', scheduleDate: '', variableId: '', value: '', note: '' });
   const [saving, setSaving] = useState(false);
 
   const variableOptions = useMemo(() => {
@@ -78,13 +78,14 @@ export function AssignmentsPanel() {
     try {
       await recordAssignment({
         date: form.date || undefined,
+        scheduleDate: form.scheduleDate || undefined,
         variableId: form.variableId,
         variableName: name,
         value: form.value.trim(),
         note: form.note.trim(),
       });
       toast.success('Assignment saved to the ledger.', { title: 'Recorded' });
-      setForm({ date: '', variableId: '', value: '', note: '' });
+      setForm({ date: '', scheduleDate: '', variableId: '', value: '', note: '' });
       setShowForm(false);
       void refetch();
     } catch (err) {
@@ -139,6 +140,20 @@ export function AssignmentsPanel() {
                 onChange={(e) => setForm({ ...form, date: e.target.value })}
               />
               <p className="text-xs text-muted-foreground">Leave empty for today.</p>
+            <div className="space-y-2">
+              <Label htmlFor="assign-schedule-date">Service date (optional)</Label>
+              <Input
+                id="assign-schedule-date"
+                type="date"
+                value={form.scheduleDate}
+                onChange={(e) => setForm({ ...form, scheduleDate: e.target.value })}
+              />
+              <p className="text-xs text-muted-foreground">
+                Pin the date this assignment is for. Leave empty to derive it from the recurring rule.
+              </p>
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="assign-variable">FreeShow variable</Label>
             </div>
             <div className="space-y-2">
               <Label htmlFor="assign-variable">FreeShow variable</Label>
@@ -271,6 +286,7 @@ export function AssignmentsPanel() {
                 <thead>
                   <tr className="border-b text-xs uppercase tracking-wide text-muted-foreground">
                     <th className="py-2 pr-3 font-medium">Date</th>
+                    <th className="py-2 pr-3 font-medium">Service date</th>
                     <th className="py-2 pr-3 font-medium">Variable</th>
                     <th className="py-2 pr-3 font-medium">Assigned to</th>
                     <th className="py-2 pr-3 font-medium">Source</th>
@@ -282,6 +298,27 @@ export function AssignmentsPanel() {
                   {assignments.map((row) => (
                     <tr key={row.id} className="border-b last:border-0">
                       <td className="py-2 pr-3 whitespace-nowrap font-medium">{row.date}</td>
+                      <td className="py-2 pr-3 whitespace-nowrap">
+                        <span className="inline-flex items-center gap-1.5">
+                          {row.effectiveDate ?? row.date}
+                          {row.scheduleSource === 'pinned' && (
+                            <span
+                              className="rounded-full bg-primary/10 px-2 py-0.5 text-xs text-primary"
+                              title="This date was pinned on the entry itself."
+                            >
+                              pinned
+                            </span>
+                          )}
+                          {row.scheduleSource === 'rule' && (
+                            <span
+                              className="rounded-full bg-emerald-500/10 px-2 py-0.5 text-xs text-emerald-700 dark:text-emerald-400"
+                              title="Derived from the variable's recurring schedule."
+                            >
+                              rule
+                            </span>
+                          )}
+                        </span>
+                      </td>
                       <td className="py-2 pr-3">{row.variableName}</td>
                       <td className="py-2 pr-3">{row.contactName || row.value}</td>
                       <td className="py-2 pr-3">

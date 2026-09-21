@@ -26,6 +26,7 @@ const DATA_KINDS: DataKindInfo[] = [
   { kind: 'contacts', label: 'Contact List', description: 'Contacts and nicknames', filename: 'contacts' },
   { kind: 'rules', label: 'Conditional Rules', description: 'Conditional message rules', filename: 'conditional-rules' },
   { kind: 'logs', label: 'Message History', description: 'Sent message history', filename: 'message-history' },
+  { kind: 'schedules', label: 'Schedule Rules', description: 'Recurring service-date rules per variable', filename: 'schedule-rules' },
 ];
 
 export function DataManager() {
@@ -38,6 +39,7 @@ export function DataManager() {
     contacts: null,
     rules: null,
     logs: null,
+    schedules: null,
   });
 
   const refresh = useCallback(async () => {
@@ -60,6 +62,7 @@ export function DataManager() {
       contacts: count('contacts'),
       rules: count('rules'),
       logs: count('logs'),
+      schedules: count('schedules'),
     };
   })();
 

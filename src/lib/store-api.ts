@@ -18,6 +18,9 @@ import type {
   RotationOverviewRow,
   RotationPersonSummary,
   RotationReport,
+  ScheduleBackfillResult,
+  ScheduleInfo,
+  ScheduleRuleInput,
 } from '../types/assignments';
 import type { AuthSessionRow, AuthUser } from '../types/auth';
 import type { ConditionalRule, SavedTemplate } from '../types/templates';
@@ -238,6 +241,7 @@ export async function fetchAssignments(params: {
 
 export async function createAssignment(payload: {
   date?: string;
+  scheduleDate?: string;
   variableId: string;
   variableName: string;
   value: string;
@@ -294,6 +298,40 @@ export async function fetchRotationPeople(
     withQuery('/api/rotation/people', { variable, limit })
   );
   return data.people;
+}
+
+// --------------------------------------------------------------------------- //
+// Recurring schedules
+// --------------------------------------------------------------------------- //
+export async function fetchSchedules(): Promise<ScheduleInfo[]> {
+  const data = await api.get<{ schedules: ScheduleInfo[] }>('/api/schedules');
+  return data.schedules;
+}
+
+/** Create or replace the recurring schedule for one variable. */
+export async function putSchedule(
+  variableName: string,
+  rule: ScheduleRuleInput
+): Promise<{ item: ScheduleInfo; created: boolean }> {
+  const data = await api.put<{ item: ScheduleInfo; created: boolean }>(
+    `/api/schedules/${encodeURIComponent(variableName)}`,
+    rule
+  );
+  return { item: data.item, created: data.created };
+}
+
+export async function deleteSchedule(variableName: string): Promise<void> {
+  await api.delete(`/api/schedules/${encodeURIComponent(variableName)}`);
+}
+
+/**
+ * Materialise the rule-derived service dates on the ledger. `dryRun` previews
+ * how many rows would change without writing anything.
+ */
+export async function backfillSchedules(
+  params: { variable?: string; dryRun?: boolean } = {}
+): Promise<ScheduleBackfillResult> {
+  return api.post<ScheduleBackfillResult>('/api/schedules/backfill', params);
 }
 
 // --------------------------------------------------------------------------- //

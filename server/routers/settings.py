@@ -22,6 +22,7 @@ from db import get_db
 from models import (
     AppSetting,
     Assignment,
+    AssignmentScheduleRule,
     ConditionalRule,
     Contact,
     MessageLog,
@@ -47,6 +48,7 @@ SECTION_MODELS: dict[str, Any] = {
     "rules": ConditionalRule,
     "logs": MessageLog,
     "assignments": Assignment,
+    "schedules": AssignmentScheduleRule,
 }
 
 # Fields that must not be copied blindly from an imported bundle.

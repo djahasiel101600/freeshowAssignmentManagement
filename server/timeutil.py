@@ -24,6 +24,27 @@ except ZoneInfoNotFoundError:  # pragma: no cover - only on a broken tzdata
     SCHEDULE_TZ_NAME = "UTC"
 
 
+__all__ = [
+    "WEEKDAY_NAMES",
+    "days_between",
+    "local_now",
+    "normalize_key",
+    "parse_iso_date",
+    "to_iso_date",
+    "today_iso",
+    "utc_now",
+    "utc_now_iso",
+    "week_start_iso",
+]
+
+# Index == ``date.weekday()`` (0 = Monday). Shared by the models (serialising a
+# recurring schedule) and the recurrence/rotation analysis so the two can never
+# disagree about which day "5" means.
+WEEKDAY_NAMES = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
+
+SHORT_WEEKDAY_NAMES = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+
+
 def utc_now() -> datetime:
     return datetime.now(timezone.utc)
 

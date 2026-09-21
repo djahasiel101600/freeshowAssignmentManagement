@@ -28,7 +28,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from models import Assignment, AssignmentChange, Contact
-from timeutil import local_now, normalize_key, today_iso, utc_now_iso
+from timeutil import local_now, normalize_key, to_iso_date, today_iso, utc_now_iso
 
 log = logging.getLogger("freeshow.assignments")
 
@@ -139,17 +139,25 @@ def record_variable_change(
     source: str = "bridge",
     trigger: str = "",
     assignment_date: Optional[str] = None,
+    schedule_date: Optional[str] = None,
     note: str = "",
     user_id: Optional[str] = None,
     index: Optional[dict[str, Contact]] = None,
     commit: bool = True,
 ) -> Optional[Assignment]:
     """
-    Upsert today's assignment for one variable and log the change.
+    Upsert the assignment for one variable/date and log the change.
+
+    ``assignment_date`` is the day the change was *recorded*; ``schedule_date``
+    optionally pins the *service* it belongs to (manual entry or a backfill).
+    Bridge snapshots leave it empty on purpose, so the recurring schedule rule
+    keeps deciding the service date at read time - retuning a rule then also
+    corrects how past entries are interpreted.
 
     Returns the ``Assignment`` row, or ``None`` when nothing was recorded.
     """
     when = assignment_date or today_iso()
+    pinned = to_iso_date(schedule_date) if schedule_date else None
     if index is None:
         index = build_contact_index(db)
 
@@ -166,6 +174,7 @@ def record_variable_change(
     if row is None:
         row = Assignment(
             assignment_date=when,
+            schedule_date=pinned,
             variable_id=variable_id,
             variable_name=variable_name,
             value=new_value,
@@ -186,6 +195,10 @@ def record_variable_change(
         row.contact_name = contact_name
         row.contact_phone = phone
         row.source = source
+        # An explicit service date wins; a snapshot (pinned=None) never clears a
+        # date a person pinned, it just leaves the rule in charge.
+        if pinned:
+            row.schedule_date = pinned
         if note:
             row.note = note
         row.updated_at = now

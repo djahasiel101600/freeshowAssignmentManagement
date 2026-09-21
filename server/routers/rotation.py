@@ -12,6 +12,7 @@ questions that motivated keeping history in a database at all:
 
 from __future__ import annotations
 
+from datetime import timedelta
 from typing import Any, Optional
 
 from fastapi import APIRouter, Depends, Query
@@ -26,6 +27,7 @@ from services.rotation_service import (
     list_assignments,
     tracked_variable_names,
 )
+from timeutil import WEEKDAY_NAMES, parse_iso_date, today_iso
 
 router = APIRouter(prefix="/api/rotation", tags=["rotation"])
 
@@ -78,9 +80,11 @@ def rotation_summary(
                 "distinctPeople": report["distinctPeople"],
                 "lastDate": report["lastDate"],
                 "cycle": report["cycle"],
+                "schedule": report["schedule"],
                 "nextExpected": report["nextExpected"],
                 "rotationOrder": report["rotationOrder"],
                 "dominantWeekday": report["dominantWeekday"],
+                "entryWeekday": report["entryWeekday"],
             }
         )
     return {"ok": True, "reports": reports, "count": len(reports)}
@@ -146,21 +150,46 @@ def rotation_upcoming(
     db: Session = Depends(get_db),
     _: User = Depends(current_user),
 ) -> dict[str, Any]:
-    """Predicted next turn per variable, filtered to the near future."""
+    """
+    Predicted next turn per variable, filtered to a real date window.
+
+    ``lookahead_days`` is now honoured: the window is applied to the predicted
+    *service* date (rule-based when a schedule is set), so a weekly Sunday
+    rotation shows up when its Sunday falls inside the window rather than always
+    being listed because it has a prediction attached.
+    """
+    today = parse_iso_date(today_iso())
+    horizon = today + timedelta(days=lookahead_days) if today else None
+
     upcoming: list[dict[str, Any]] = []
     for name in tracked_variable_names(db):
         report = analyze_variable(db, name)
-        expected = report.get("nextExpected")
-        if expected:
-            upcoming.append(
-                {
-                    "variableName": name,
-                    "person": expected,
-                    "cycle": report["cycle"],
-                    "lastDate": report["lastDate"],
-                }
-            )
+        expected = report.get("nextExpected") or {}
+        date_iso = expected.get("predictedNextDate")
+        when = parse_iso_date(date_iso) if date_iso else None
+        if when is None:
+            continue
+        if today and horizon and not (today <= when <= horizon):
+            continue
+        upcoming.append(
+            {
+                "variableName": name,
+                "person": expected,
+                "date": date_iso,
+                "weekday": WEEKDAY_NAMES[when.weekday()],
+                "cycle": report["cycle"],
+                "schedule": report["schedule"],
+                "lastDate": report["lastDate"],
+            }
+        )
+
+    upcoming.sort(key=lambda item: (item["date"], item["variableName"]))
     # Also expose the most recent rows so the UI can show recent history.
     recent = [row.to_dict() for row in list_assignments(db, limit=10)]
-    del lookahead_days  # reserved for date-window filtering in a later iteration
-    return {"upcoming": upcoming, "recent": recent}
+    return {
+        "upcoming": upcoming,
+        "recent": recent,
+        "count": len(upcoming),
+        "from": today.isoformat() if today else None,
+        "to": horizon.isoformat() if horizon else None,
+    }

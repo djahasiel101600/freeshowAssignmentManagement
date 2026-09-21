@@ -20,13 +20,14 @@ from sqlalchemy.orm import Session
 from db import get_db
 from models import Assignment, AssignmentChange, User
 from security import current_user
+from services import recurrence_service
 from services.assignment_service import record_variable_change
 from services.rotation_service import (
     list_assignments,
     list_changes,
     tracked_variable_names,
 )
-from timeutil import to_iso_date, today_iso
+from timeutil import parse_iso_date, to_iso_date, today_iso
 
 log = logging.getLogger("freeshow.assignments.api")
 
@@ -34,11 +35,29 @@ router = APIRouter(prefix="/api", tags=["assignments"])
 
 
 class AssignmentPayload(BaseModel):
-    date: Optional[str] = None            # YYYY-MM-DD, defaults to today
+    date: Optional[str] = None            # YYYY-MM-DD, the day it was recorded
+    scheduleDate: Optional[str] = None    # YYYY-MM-DD, the service it is for
     variableId: str = Field(min_length=1, max_length=64)
     variableName: str = Field(min_length=1, max_length=160)
     value: str = ""
     note: str = ""
+
+
+def _with_service_date(row: Assignment, rule: Any) -> dict[str, Any]:
+    """
+    Add the resolved service date to a ledger row.
+
+    ``scheduleDate`` is what is stored (NULL for bridge rows), ``effectiveDate``
+    is what the analysis counts the row on, and ``scheduleSource`` says why -
+    so the ledger can show "recorded 2026-09-20 · for 2026-09-27 (every Sunday)".
+    """
+    item = row.to_dict()
+    recorded = parse_iso_date(row.assignment_date)
+    effective = recurrence_service.effective_date(recorded, row.schedule_date, rule)
+    item["effectiveDate"] = effective.isoformat() if effective else row.assignment_date
+    item["scheduleSource"] = recurrence_service.effective_date_source(row.schedule_date, rule)
+    item["scheduleDescription"] = recurrence_service.describe_rule(rule)
+    return item
 
 
 @router.get("/assignments")
@@ -59,7 +78,10 @@ def get_assignments(
         person=person,
         limit=limit,
     )
-    items = [row.to_dict() for row in rows]
+    # One rule lookup for the whole page, so each row can report the service
+    # date it is counted on.
+    rules = recurrence_service.rules_by_variable(db)
+    items = [_with_service_date(row, rules.get(row.variable_name)) for row in rows]
     return {"assignments": items, "count": len(items), "today": today_iso()}
 
 
@@ -109,6 +131,7 @@ def upsert_assignment(
     )
     previous = existing.value if existing is not None else ""
 
+    rule = recurrence_service.find_rule(db, payload.variableName) if payload.variableName else None
     row = record_variable_change(
         db,
         variable_id=payload.variableId,
@@ -118,12 +141,13 @@ def upsert_assignment(
         source="manual",
         trigger="manual-edit",
         assignment_date=when,
+        schedule_date=payload.scheduleDate,
         note=payload.note,
         user_id=None if user.username == "machine" else user.id,
     )
     if row is None:
         raise HTTPException(status_code=400, detail="Nothing to record")
-    return {"ok": True, "item": row.to_dict()}
+    return {"ok": True, "item": _with_service_date(row, rule)}
 
 
 @router.delete("/assignments/{assignment_id}")

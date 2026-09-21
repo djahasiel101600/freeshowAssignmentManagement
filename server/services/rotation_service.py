@@ -8,7 +8,13 @@ Answers the questions that motivated the database in the first place:
 * **What is the rotation order?** — the sequence of people in first-appearance
   order, plus whether the sequence repeats cleanly.
 * **Who is next (and when)?** — predicted date + predicted person.
-* **Who was assigned previously?** — per-person totals and last dates.
+
+Every date here is an *effective* (service) date, not the day the bridge
+happened to see the change: when a variable has a recurring schedule rule
+(``services.recurrence_service``), each recorded row is mapped onto the service
+it was entered for. That is what makes "next" land on a Friday/Saturday/Sunday
+instead of on the evening the schedule was typed in. Rows with no rule keep
+behaving exactly as before (recorded date = effective date).
 
 All functions are pure reads: they never mutate the ledger.
 """
@@ -24,9 +30,8 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from models import Assignment, AssignmentChange
-from timeutil import parse_iso_date, today_iso
-
-WEEKDAY_NAMES = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
+from services import recurrence_service
+from timeutil import WEEKDAY_NAMES, parse_iso_date, today_iso
 
 
 # --------------------------------------------------------------------------- #
@@ -141,6 +146,42 @@ def _predict_next(dates: list[date], modal_gap: Optional[int]) -> Optional[str]:
     return candidate.isoformat()
 
 
+def _next_service_date(rule: Any, last_date: Optional[date], today: date) -> Optional[str]:
+    """
+    The next occurrence of a schedule rule, strictly after the last one recorded.
+
+    Walking the rule's own ladder (rather than counting from today) keeps the
+    answer on the configured weekday even for a stale ledger: a weekly Sunday
+    rule whose last entry is 2026-08-30 still predicts 2026-09-27.
+    """
+    if not recurrence_service.is_configured(rule):
+        return None
+    step = recurrence_service.interval_days(rule)
+    candidate = (
+        recurrence_service.next_occurrence(rule, last_date, include_after=False)
+        if last_date is not None
+        else None
+    )
+    if candidate is None:
+        candidate = recurrence_service.next_occurrence(rule, today)
+    if candidate is None:
+        return None
+    guard = 0
+    while candidate <= today and guard < recurrence_service.MAX_LADDER_STEPS:
+        candidate += timedelta(days=step)
+        guard += 1
+    return candidate.isoformat()
+
+
+def _is_overdue(person: dict[str, Any]) -> bool:
+    """True when someone is already past the gap they usually wait between turns."""
+    since = person.get("daysSinceLast")
+    gap = person.get("gapDays") or person.get("modalGapDays")
+    if since is None or not gap:
+        return False
+    return since >= gap
+
+
 # --------------------------------------------------------------------------- #
 # Analysis
 # --------------------------------------------------------------------------- #
@@ -153,20 +194,40 @@ def analyze_variable(
     if today is not None and lookback_days > 0:
         cutoff = (today - timedelta(days=lookback_days)).isoformat()
 
+    rule = recurrence_service.find_rule(db, variable_name, enabled_only=True)
+
     query = select(Assignment).where(Assignment.variable_name == variable_name)
     if cutoff:
         query = query.where(Assignment.assignment_date >= cutoff)
     rows = list(db.scalars(query.order_by(Assignment.assignment_date)).all())
 
+    # --- recorded date -> service date ------------------------------------ #
+    # Every row is an *observation* ("the bridge saw this value change on day
+    # X"). With a schedule rule the observation is mapped onto the service it
+    # was entered for, which is what makes the rest of this function predict the
+    # right weekday; without a rule the recorded date is used, exactly as before.
+    recorded_dates: list[date] = []
+    effective_rows: dict[date, Assignment] = {}
+    for row in rows:
+        recorded = parse_iso_date(row.assignment_date)
+        if recorded is None:
+            continue
+        recorded_dates.append(recorded)
+        effective = recurrence_service.effective_date(recorded, row.schedule_date, rule)
+        if effective is None:
+            continue
+        # Several observations can map onto one service (e.g. a correction the
+        # next day); the later observation wins so a turn is never counted twice.
+        effective_rows[effective] = row
+    series: list[tuple[date, Assignment]] = sorted(effective_rows.items())
+    all_dates = [when for when, _ in series]
+
     # --- per person ------------------------------------------------------- #
     person_dates: dict[str, list[date]] = defaultdict(list)
     person_contacts: dict[str, Optional[str]] = {}
-    for row in rows:
+    for when, row in series:
         label = (row.contact_name or row.value or "").strip()
         if not label:
-            continue
-        when = parse_iso_date(row.assignment_date)
-        if when is None:
             continue
         person_dates[label].append(when)
         person_contacts.setdefault(label, row.contact_id)
@@ -196,7 +257,7 @@ def analyze_variable(
     # --- rotation order / cycle ------------------------------------------ #
     order: list[str] = []
     seq: list[str] = []
-    for row in rows:
+    for _, row in series:
         label = (row.contact_name or row.value or "").strip()
         if not label:
             continue
@@ -213,41 +274,95 @@ def analyze_variable(
         repeat_accuracy = round(hits / len(seq), 3)
         sequence_repeats = repeat_accuracy >= 0.75
 
-    all_dates = [parse_iso_date(row.assignment_date) for row in rows]
-    all_dates = [d for d in all_dates if d is not None]
     cycle_gaps = _summarize_gaps(_gaps(all_dates))
 
-    weekday_counts: Counter[int] = Counter()
-    for row in rows:
-        when = parse_iso_date(row.assignment_date)
-        if when is not None:
-            weekday_counts[when.weekday()] += 1
-    dominant_weekday = None
-    if weekday_counts:
-        day_index, count = weekday_counts.most_common(1)[0]
-        dominant_weekday = {
-            "weekday": WEEKDAY_NAMES[day_index],
-            "share": round(count / sum(weekday_counts.values()), 3),
-        }
+    # Two different weekday questions, and they are both useful:
+    #  * service weekday - the day the assignment is *for* (rule-based).
+    #  * entry weekday   - the day the operator types it in (raw observations).
+    dominant_weekday = _dominant_weekday(Counter(when.weekday() for when in all_dates))
+    entry_weekday = _dominant_weekday(Counter(when.weekday() for when in recorded_dates))
 
+    # --- the recurring schedule (the calendar foundation) ------------------ #
+    schedule = (
+        recurrence_service.schedule_payload(rule, today=today, upcoming=4)
+        if rule is not None
+        else recurrence_service.no_schedule_payload(variable_name)
+    )
+    schedule["lastServiceDate"] = all_dates[-1].isoformat() if all_dates else None
+    schedule["entryPattern"] = recurrence_service.entry_pattern(recorded_dates, rule)
+    # The last few recorded->service mappings, so a wrong "entered N days
+    # before" offset is visible at a glance in the UI instead of silently
+    # shifting every prediction.
+    schedule["recentMappings"] = [
+        {
+            "recorded": row.assignment_date,
+            "serviceDate": when.isoformat(),
+            "person": (row.contact_name or row.value or "").strip(),
+        }
+        for when, row in series[-3:]
+    ]
+
+    last_service = all_dates[-1] if all_dates else None
+    schedule_next = _next_service_date(rule, last_service, today) if today else None
+
+    # --- who is next ------------------------------------------------------- #
     next_person: Optional[dict[str, Any]] = None
     if order:
-        last_row = rows[-1] if rows else None
-        last_person = (last_row.contact_name or last_row.value or "").strip() if last_row else ""
-        upcoming = [p for p in people if p["predictedNextDate"]]
-        if upcoming:
-            upcoming.sort(key=lambda item: item["predictedNextDate"])
-            next_person = upcoming[0]
-        elif sequence_repeats and last_person in order:
-            next_person = {"name": order[(order.index(last_person) + 1) % period], "basis": "rotation-order"}
+        last_person = (
+            (series[-1][1].contact_name or series[-1][1].value or "").strip() if series else ""
+        )
+        by_name = {person["name"]: person for person in people}
+        # Fewest turns first, then the longest wait, then rotation position:
+        # with an even rotation everyone has the same turn count and the longest
+        # wait is exactly the person who is due.
+        due = sorted(
+            people,
+            key=lambda person: (
+                person["turnCount"],
+                -(person["daysSinceLast"] or 0),
+                order.index(person["name"]) if person["name"] in order else period,
+            ),
+        )
+        due_name = due[0]["name"] if due else None
+        order_name = (
+            order[(order.index(last_person) + 1) % period]
+            if sequence_repeats and last_person in order
+            else None
+        )
+        candidate: Optional[str]
+        basis: str
+        if order_name and order_name == due_name:
+            candidate, basis = order_name, "rotation-order+turn-count"
+        elif order_name and not _is_overdue(by_name.get(due_name, {})):
+            # The declared order still holds and nobody is overdue yet.
+            candidate, basis = order_name, "rotation-order"
+        elif due_name:
+            candidate, basis = due_name, "fewest-turns"
+        else:
+            candidate, basis = order_name, "rotation-order"
+        if candidate:
+            turnaround = by_name.get(candidate, {})
+            next_person = {
+                "name": candidate,
+                "basis": basis,
+                "predictedNextDate": schedule_next or turnaround.get("predictedNextDate"),
+                "scheduleDate": schedule_next,
+                "personPredictedDate": turnaround.get("predictedNextDate"),
+                "confidence": (
+                    repeat_accuracy
+                    if basis.startswith("rotation-order") and repeat_accuracy is not None
+                    else cycle_gaps["modeShare"]
+                ),
+            }
 
     return {
         "variableName": variable_name,
         "hasData": bool(rows),
-        "totalAssignments": len(rows),
+        "totalAssignments": len(series),
+        "recordedAssignments": len(rows),
         "distinctPeople": period,
-        "firstDate": min(all_dates).isoformat() if all_dates else None,
-        "lastDate": max(all_dates).isoformat() if all_dates else None,
+        "firstDate": all_dates[0].isoformat() if all_dates else None,
+        "lastDate": all_dates[-1].isoformat() if all_dates else None,
         "lookbackDays": lookback_days,
         "people": people,
         "rotationOrder": order,
@@ -261,8 +376,22 @@ def analyze_variable(
             "rotationLength": period,
             **{f"gap{k[0].upper()}{k[1:]}": v for k, v in cycle_gaps.items()},
         },
+        "schedule": schedule,
         "dominantWeekday": dominant_weekday,
+        "entryWeekday": entry_weekday,
         "nextExpected": next_person,
+    }
+
+
+def _dominant_weekday(counts: Counter[int]) -> Optional[dict[str, Any]]:
+    """Most common weekday in a counter of ``date.weekday()`` values."""
+    if not counts:
+        return None
+    day_index, count = counts.most_common(1)[0]
+    return {
+        "weekday": WEEKDAY_NAMES[day_index],
+        "weekdayIndex": day_index,
+        "share": round(count / sum(counts.values()), 3),
     }
 
 
